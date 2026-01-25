@@ -61,6 +61,19 @@ TEST_GAME_TYPE    <- "R"   # "R" = Regular season, "P" = Playoffs, "W" = World S
 TRAIN_LEVEL <- "AAA"  # "MLB" = Major League Baseball, "AAA" = Triple-A
 TEST_LEVEL  <- "AAA"  # "MLB" = Major League Baseball, "AAA" = Triple-A
 
+# Split method selection
+# Options:
+#   "temporal" - Use specific date ranges for train and test (default)
+#                Train on one period, test on another (can overlap or be separate)
+#   "random"   - Randomly assign 50% of each pitcher's pitches to train, 50% to test
+#                Ignores TEST_START/TEST_END; uses TRAIN dates for entire period
+#                Useful for understanding model fit without temporal confounds
+SPLIT_METHOD <- "temporal"
+
+# Random seed for reproducibility (only used when SPLIT_METHOD = "random")
+# Set to NULL for different results each run, or a number for reproducibility
+RANDOM_SEED <- NULL
+
 # Baseline model selection
 # Options:
 #   "marginal"    - Simple overall pitch type distribution (weakest baseline)
@@ -97,8 +110,15 @@ cat("\n")
 cat("============================================================\n")
 cat("  Predict+ Training Pipeline\n")
 cat("============================================================\n")
-cat("Training Period: ", TRAIN_START, "to", TRAIN_END, "(", TRAIN_GAME_TYPE, ")\n")
-cat("Test Period:     ", TEST_START, "to", TEST_END, "(", TEST_GAME_TYPE, ")\n")
+cat("Split Method:    ", SPLIT_METHOD, "\n")
+if (SPLIT_METHOD == "temporal") {
+  cat("Training Period: ", TRAIN_START, "to", TRAIN_END, "(", TRAIN_GAME_TYPE, ")\n")
+  cat("Test Period:     ", TEST_START, "to", TEST_END, "(", TEST_GAME_TYPE, ")\n")
+} else {
+  cat("Data Period:     ", TRAIN_START, "to", TRAIN_END, "(", TRAIN_GAME_TYPE, ")\n")
+  cat("Test Period:      Random 50/50 split per pitcher\n")
+  if (!is.null(RANDOM_SEED)) cat("Random Seed:     ", RANDOM_SEED, "\n")
+}
 cat("Min Test Pitches:", MIN_TEST_PITCHES, "\n")
 cat("Min Total:       ", MIN_TOTAL_PITCHES, "\n")
 cat("Baseline Type:   ", BASELINE_TYPE, "\n")
@@ -110,8 +130,8 @@ cat("============================================================\n\n")
 res <- train_and_save(
   train_start       = TRAIN_START,
   train_end         = TRAIN_END,
-  test_start        = TEST_START,
-  test_end          = TEST_END,
+  test_start        = if (SPLIT_METHOD == "random") NULL else TEST_START,
+  test_end          = if (SPLIT_METHOD == "random") NULL else TEST_END,
   min_test_pitches  = MIN_TEST_PITCHES,
   min_total_pitches = MIN_TOTAL_PITCHES,
   feature_names     = FEATURE_NAMES,
@@ -119,6 +139,8 @@ res <- train_and_save(
   baseline_type     = BASELINE_TYPE,
   train_game_type   = TRAIN_GAME_TYPE,
   test_game_type    = TEST_GAME_TYPE,
+  split_method      = SPLIT_METHOD,
+  random_seed       = RANDOM_SEED,
   out_model         = OUT_MODEL,
   out_ppi           = OUT_CSV,
   verbose           = TRUE
@@ -133,6 +155,7 @@ cat("============================================================\n")
 cat("  Training Complete - Summary Statistics\n")
 cat("============================================================\n")
 cat("Total pitchers:  ", nrow(res$pitcher_ppi), "\n")
+cat("Split method:    ", res$split_method, "\n")
 cat("Training period: ", res$train_period, "\n")
 cat("Test period:     ", res$test_period, "\n")
 cat("Training pitches:", nrow(res$train), "\n")
