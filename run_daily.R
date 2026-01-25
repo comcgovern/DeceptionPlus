@@ -265,6 +265,13 @@ per_pitcher_results <- per_pitcher_results %>%
                                 pmax(baseline_params$sd, 1e-12))
   )
 
+# Identify starter/reliever roles from test data
+message("Identifying starter/reliever roles...")
+pitcher_roles <- get_daily_pitcher_roles(df_test)
+n_starters <- sum(pitcher_roles$role == "starter")
+n_relievers <- sum(pitcher_roles$role == "reliever")
+message("  ", n_starters, " starters, ", n_relievers, " relievers")
+
 # Resolve pitcher names (for both evaluated and excluded pitchers)
 message("Resolving pitcher names...")
 all_pitcher_ids <- dplyr::bind_rows(
@@ -279,16 +286,18 @@ name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids,
 # Create evaluated pitchers output
 evaluated_ppi <- per_pitcher_results %>%
   dplyr::left_join(name_map, by = "pitcher_id") %>%
+  dplyr::left_join(pitcher_roles, by = "pitcher_id") %>%
   dplyr::mutate(
     pitcher_name = dplyr::if_else(is.na(pitcher_name),
                                    paste0("Pitcher_", pitcher_id),
                                    pitcher_name),
     total_pitches = n_history,
     n_pitches_test = n_test,
-    status = "evaluated"
+    status = "evaluated",
+    role = dplyr::coalesce(role, "unknown")
   ) %>%
   dplyr::select(
-    pitcher_id, pitcher_name, total_pitches, n_pitches_test,
+    pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     mean_surp_model, mean_surp_base, ppi,
     unpredictability_ratio, predict_plus, status
   ) %>%
@@ -297,6 +306,7 @@ evaluated_ppi <- per_pitcher_results %>%
 # Create excluded pitchers output (debuts, insufficient history)
 excluded_ppi <- excluded_pitchers %>%
   dplyr::left_join(name_map, by = "pitcher_id") %>%
+  dplyr::left_join(pitcher_roles, by = "pitcher_id") %>%
   dplyr::mutate(
     pitcher_name = dplyr::if_else(is.na(pitcher_name),
                                    paste0("Pitcher_", pitcher_id),
@@ -307,10 +317,11 @@ excluded_ppi <- excluded_pitchers %>%
     mean_surp_base = NA_real_,
     ppi = NA_real_,
     unpredictability_ratio = NA_real_,
-    predict_plus = NA_real_
+    predict_plus = NA_real_,
+    role = dplyr::coalesce(role, "unknown")
   ) %>%
   dplyr::select(
-    pitcher_id, pitcher_name, total_pitches, n_pitches_test,
+    pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     mean_surp_model, mean_surp_base, ppi,
     unpredictability_ratio, predict_plus, status
   )
@@ -392,27 +403,61 @@ cat("Baseline:          μ=", round(baseline_params$mu, 4),
 cat("\n")
 
 # Show top 5 and bottom 5 with >= MIN_PITCHES_SOCIAL (only evaluated pitchers)
+# Split by starters and relievers
 qualified <- pitcher_ppi %>%
   dplyr::filter(status == "evaluated", n_pitches_test >= MIN_PITCHES_SOCIAL)
 
-if (nrow(qualified) > 0) {
-  cat("Top 5 Least Predictable (>= ", MIN_PITCHES_SOCIAL, " pitches):\n", sep = "")
-  top5 <- qualified %>%
-    dplyr::arrange(dplyr::desc(predict_plus)) %>%
-    head(5) %>%
-    dplyr::mutate(rank = dplyr::row_number()) %>%
-    dplyr::select(rank, pitcher_name, n_pitches_test, predict_plus)
-  print(as.data.frame(top5), row.names = FALSE)
+qualified_starters <- qualified %>% dplyr::filter(role == "starter")
+qualified_relievers <- qualified %>% dplyr::filter(role == "reliever")
 
-  cat("\nTop 5 Most Predictable (>= ", MIN_PITCHES_SOCIAL, " pitches):\n", sep = "")
-  bottom5 <- qualified %>%
-    dplyr::arrange(predict_plus) %>%
-    head(5) %>%
+# Helper function to print rankings
+print_rankings <- function(data, title_top, title_bottom, n = 5) {
+  if (nrow(data) == 0) {
+    cat("No pitchers qualified.\n")
+    return()
+  }
+
+  cat(title_top, ":\n", sep = "")
+  top_n <- data %>%
+    dplyr::arrange(dplyr::desc(predict_plus)) %>%
+    head(n) %>%
     dplyr::mutate(rank = dplyr::row_number()) %>%
     dplyr::select(rank, pitcher_name, n_pitches_test, predict_plus)
-  print(as.data.frame(bottom5), row.names = FALSE)
+  print(as.data.frame(top_n), row.names = FALSE)
+
+  cat("\n", title_bottom, ":\n", sep = "")
+  bottom_n <- data %>%
+    dplyr::arrange(predict_plus) %>%
+    head(n) %>%
+    dplyr::mutate(rank = dplyr::row_number()) %>%
+    dplyr::select(rank, pitcher_name, n_pitches_test, predict_plus)
+  print(as.data.frame(bottom_n), row.names = FALSE)
+}
+
+# Starters
+cat("--- STARTERS (>= ", MIN_PITCHES_SOCIAL, " pitches) ---\n", sep = "")
+if (nrow(qualified_starters) > 0) {
+  print_rankings(
+    qualified_starters,
+    paste0("Top 5 Least Predictable Starters"),
+    paste0("Top 5 Most Predictable Starters")
+  )
 } else {
-  cat("No pitchers with >= ", MIN_PITCHES_SOCIAL, " pitches today.\n")
+  cat("No starters with >= ", MIN_PITCHES_SOCIAL, " pitches today.\n", sep = "")
+}
+
+cat("\n")
+
+# Relievers
+cat("--- RELIEVERS (>= ", MIN_PITCHES_SOCIAL, " pitches) ---\n", sep = "")
+if (nrow(qualified_relievers) > 0) {
+  print_rankings(
+    qualified_relievers,
+    paste0("Top 5 Least Predictable Relievers"),
+    paste0("Top 5 Most Predictable Relievers")
+  )
+} else {
+  cat("No relievers with >= ", MIN_PITCHES_SOCIAL, " pitches today.\n", sep = "")
 }
 
 cat("\n")

@@ -804,6 +804,68 @@ load_baseline_params <- function(baseline_file = "baseline_params.rds") {
   readRDS(baseline_file)
 }
 
+#' Identify starting pitchers for each game
+#'
+#' Determines which pitchers were starters (threw first pitch for their team)
+#' vs relievers (entered the game later) for each game in the dataset.
+#'
+#' @param df Data frame with pitch data (must have game_pk, pitcher_id, inning_topbot, at_bat_number)
+#' @return Data frame with pitcher_id, game_pk, and role (starter/reliever)
+identify_starter_reliever <- function(df) {
+  # For each game + team side (top/bottom), find the pitcher who threw the first pitch
+  # The pitcher with the minimum at_bat_number in inning 1 is the starter
+
+  # First, identify starters: the pitcher who pitched first for each team in each game
+  starters <- df %>%
+    dplyr::filter(inning == 1) %>%
+    dplyr::group_by(game_pk, inning_topbot) %>%
+    dplyr::arrange(at_bat_number) %>%
+    dplyr::slice_head(n = 1) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(game_pk, pitcher_id) %>%
+    dplyr::distinct() %>%
+    dplyr::mutate(is_starter = TRUE)
+
+
+  # Get all pitcher-game combinations
+  all_appearances <- df %>%
+    dplyr::select(game_pk, pitcher_id) %>%
+    dplyr::distinct()
+
+  # Join and classify
+  pitcher_roles <- all_appearances %>%
+    dplyr::left_join(starters, by = c("game_pk", "pitcher_id")) %>%
+    dplyr::mutate(
+      is_starter = dplyr::coalesce(is_starter, FALSE),
+      role = dplyr::if_else(is_starter, "starter", "reliever")
+    ) %>%
+    dplyr::select(game_pk, pitcher_id, role)
+
+  pitcher_roles
+}
+
+#' Get pitcher role summary for a single day
+#'
+#' For each pitcher, determines if they were a starter or reliever that day.
+#' If a pitcher appeared in multiple games (doubleheader), uses starter if they
+#' started any game, otherwise reliever.
+#'
+#' @param df Data frame with pitch data for a single day
+#' @return Data frame with pitcher_id and role
+get_daily_pitcher_roles <- function(df) {
+  roles <- identify_starter_reliever(df)
+
+  # If pitcher appeared in multiple games, prioritize "starter" role
+  daily_roles <- roles %>%
+    dplyr::group_by(pitcher_id) %>%
+    dplyr::summarise(
+      role = dplyr::if_else(any(role == "starter"), "starter", "reliever"),
+      .groups = "drop"
+    )
+
+  daily_roles
+}
+
 # ---------------------- Train / Evaluate / PPI -------------------------------
 train_ppi <- function(train_start, train_end,
                       test_start = NULL, test_end = NULL,
@@ -1314,9 +1376,15 @@ create_social_media_graphics <- function(res,
 
   library(ggplot2)
 
-  # Filter pitchers with minimum pitches in test (the day's data)
+  # Filter pitchers with minimum pitches in test (the day's data) and evaluated status
   qualified <- res$pitcher_ppi %>%
     filter(n_pitches_test >= min_pitches)
+
+  # If status column exists, filter to evaluated only
+
+  if ("status" %in% names(qualified)) {
+    qualified <- qualified %>% filter(status == "evaluated")
+  }
 
   if (nrow(qualified) == 0) {
     warning("No pitchers with >= ", min_pitches, " pitches found")
@@ -1345,74 +1413,122 @@ create_social_media_graphics <- function(res,
       )
   }
 
-  # Top 5 Least Predictable (highest Predict+)
-  top_unpred <- qualified %>%
-    arrange(desc(predict_plus)) %>%
-    head(top_n) %>%
-    mutate(
-      pitcher_name = reorder(pitcher_name, predict_plus),
-      label = sprintf("%.0f", predict_plus),
-      bar_color = scales::col_numeric(
-        palette = c("#4361ee", "#3a0ca3"),
-        domain = range(predict_plus)
-      )(predict_plus)
-    )
+  # Helper function to create a single graphic
+  create_graphic <- function(data, title, subtitle, caption, fill_low, fill_high,
+                              filename, reorder_desc = TRUE) {
+    if (nrow(data) == 0) return(NULL)
 
-  p_top <- ggplot(top_unpred, aes(x = predict_plus, y = pitcher_name)) +
-    geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
-    geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
-    geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
-    scale_fill_gradient(low = "#4361ee", high = "#7209b7") +
-    scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
-    labs(
+    data <- data %>%
+      mutate(
+        pitcher_name = if (reorder_desc) reorder(pitcher_name, predict_plus)
+                       else reorder(pitcher_name, -predict_plus),
+        label = sprintf("%.0f", predict_plus)
+      )
+
+    p <- ggplot(data, aes(x = predict_plus, y = pitcher_name)) +
+      geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
+      geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
+      geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
+      scale_fill_gradient(low = fill_low, high = fill_high) +
+      scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+      labs(title = title, subtitle = subtitle, x = "Predict+", y = NULL, caption = caption) +
+      theme_social()
+
+    ggsave(file.path(output_dir, filename), p, width = 10, height = 6, dpi = 300)
+    p
+  }
+
+  plots <- list()
+
+  # Check if role column exists for starter/reliever split
+  has_roles <- "role" %in% names(qualified)
+
+  if (has_roles) {
+    starters <- qualified %>% filter(role == "starter")
+    relievers <- qualified %>% filter(role == "reliever")
+
+    # Starters - Least Predictable
+    if (nrow(starters) > 0) {
+      top_starters <- starters %>% arrange(desc(predict_plus)) %>% head(top_n)
+      plots$starters_unpredictable <- create_graphic(
+        top_starters,
+        title = "Least Predictable Starters",
+        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+        caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+        fill_low = "#4361ee", fill_high = "#7209b7",
+        filename = sprintf("social_starters_top%d_unpredictable_%s.png", top_n, date_short),
+        reorder_desc = TRUE
+      )
+
+      # Starters - Most Predictable
+      bottom_starters <- starters %>% arrange(predict_plus) %>% head(top_n)
+      plots$starters_predictable <- create_graphic(
+        bottom_starters,
+        title = "Most Predictable Starters",
+        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+        caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+        fill_low = "#e63946", fill_high = "#f4a261",
+        filename = sprintf("social_starters_top%d_predictable_%s.png", top_n, date_short),
+        reorder_desc = FALSE
+      )
+    }
+
+    # Relievers - Least Predictable
+    if (nrow(relievers) > 0) {
+      top_relievers <- relievers %>% arrange(desc(predict_plus)) %>% head(top_n)
+      plots$relievers_unpredictable <- create_graphic(
+        top_relievers,
+        title = "Least Predictable Relievers",
+        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+        caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+        fill_low = "#2a9d8f", fill_high = "#264653",
+        filename = sprintf("social_relievers_top%d_unpredictable_%s.png", top_n, date_short),
+        reorder_desc = TRUE
+      )
+
+      # Relievers - Most Predictable
+      bottom_relievers <- relievers %>% arrange(predict_plus) %>% head(top_n)
+      plots$relievers_predictable <- create_graphic(
+        bottom_relievers,
+        title = "Most Predictable Relievers",
+        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+        caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+        fill_low = "#e76f51", fill_high = "#f4a261",
+        filename = sprintf("social_relievers_top%d_predictable_%s.png", top_n, date_short),
+        reorder_desc = FALSE
+      )
+    }
+
+    n_graphics <- sum(!sapply(plots, is.null))
+    message("Created ", n_graphics, " social media graphics (starters/relievers) in ", output_dir)
+  } else {
+    # Fallback: No role column, create overall graphics
+    top_unpred <- qualified %>% arrange(desc(predict_plus)) %>% head(top_n)
+    plots$top_unpredictable <- create_graphic(
+      top_unpred,
       title = "Least Predictable Pitchers",
       subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-      x = "Predict+",
-      y = NULL,
-      caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus"
-    ) +
-    theme_social()
-
-  ggsave(
-    file.path(output_dir, sprintf("social_top%d_unpredictable_%s.png", top_n, date_short)),
-    p_top, width = 10, height = 6, dpi = 300
-  )
-
-  # Bottom 5 Most Predictable (lowest Predict+)
-  top_pred <- qualified %>%
-    arrange(predict_plus) %>%
-    head(top_n) %>%
-    mutate(
-      pitcher_name = reorder(pitcher_name, -predict_plus),
-      label = sprintf("%.0f", predict_plus),
-      bar_color = scales::col_numeric(
-        palette = c("#e63946", "#f4a261"),
-        domain = range(predict_plus)
-      )(predict_plus)
+      caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+      fill_low = "#4361ee", fill_high = "#7209b7",
+      filename = sprintf("social_top%d_unpredictable_%s.png", top_n, date_short),
+      reorder_desc = TRUE
     )
 
-  p_bottom <- ggplot(top_pred, aes(x = predict_plus, y = pitcher_name)) +
-    geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
-    geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
-    geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
-    scale_fill_gradient(low = "#e63946", high = "#f4a261") +
-    scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
-    labs(
+    top_pred <- qualified %>% arrange(predict_plus) %>% head(top_n)
+    plots$top_predictable <- create_graphic(
+      top_pred,
       title = "Most Predictable Pitchers",
       subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-      x = "Predict+",
-      y = NULL,
-      caption = "Lower = More Predictable | 100 = League Average | @PredictPlus"
-    ) +
-    theme_social()
+      caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+      fill_low = "#e63946", fill_high = "#f4a261",
+      filename = sprintf("social_top%d_predictable_%s.png", top_n, date_short),
+      reorder_desc = FALSE
+    )
 
-  ggsave(
-    file.path(output_dir, sprintf("social_top%d_predictable_%s.png", top_n, date_short)),
-    p_bottom, width = 10, height = 6, dpi = 300
-  )
+    message("Created 2 social media graphics in ", output_dir)
+  }
 
-  message("✅ Created social media graphics in ", output_dir)
-  invisible(list(top_unpredictable = p_top, top_predictable = p_bottom))
+  invisible(plots)
 }
 
 # ---------------------- CLI --------------------------------------------------
