@@ -599,7 +599,9 @@ resolve_pitcher_names_with_fallback <- function(df_with_ids,
 #' @param min_test_pitches Minimum test pitches per pitcher (default: 10)
 #' @param feature_names Features to use in per-pitcher models
 #' @param verbose Print progress messages
-#' @return Data frame with per-pitcher unpredictability metrics
+#' @return List with:
+#'   - results: Data frame with per-pitcher unpredictability metrics
+#'   - excluded: Data frame with pitchers who couldn't be evaluated and why
 evaluate_per_pitcher <- function(df_history,
                                   df_test,
                                   min_train_pitches = 100,
@@ -610,13 +612,15 @@ evaluate_per_pitcher <- function(df_history,
                                   verbose = TRUE) {
 
   # Prepare factor columns for history data
-  df_history <- df_history %>%
-    mutate(
-      pitch_class = factor(pitch_class),
-      stand = na_safe_factor(stand),
-      p_throws = na_safe_factor(p_throws),
-      last_pitch_type = na_safe_factor(last_pitch_type)
-    )
+  if (nrow(df_history) > 0) {
+    df_history <- df_history %>%
+      mutate(
+        pitch_class = factor(pitch_class),
+        stand = na_safe_factor(stand),
+        p_throws = na_safe_factor(p_throws),
+        last_pitch_type = na_safe_factor(last_pitch_type)
+      )
+  }
 
   # Prepare factor columns for test data
   df_test <- df_test %>%
@@ -627,28 +631,61 @@ evaluate_per_pitcher <- function(df_history,
       last_pitch_type = na_safe_factor(last_pitch_type)
     )
 
-  # Get pitchers with enough data in both history and test
+  # Get all pitchers in test data
+  all_test_pitchers <- df_test %>%
+    group_by(pitcher_id) %>%
+    summarise(n_test = n(), .groups = "drop")
+
+  # Get history counts (0 for pitchers not in history)
   history_counts <- df_history %>%
     group_by(pitcher_id) %>%
-    summarise(n_history = n(), .groups = "drop") %>%
-    filter(n_history >= min_train_pitches)
+    summarise(n_history = n(), .groups = "drop")
 
-  test_counts <- df_test %>%
-    group_by(pitcher_id) %>%
-    summarise(n_test = n(), .groups = "drop") %>%
-    filter(n_test >= min_test_pitches)
+  # Join to get full picture
+  pitcher_status <- all_test_pitchers %>%
+    left_join(history_counts, by = "pitcher_id") %>%
+    mutate(n_history = coalesce(n_history, 0L))
 
-  valid_pitchers <- intersect(history_counts$pitcher_id, test_counts$pitcher_id)
+  # Classify pitchers
+  pitcher_status <- pitcher_status %>%
+    mutate(
+      status = case_when(
+        n_history == 0 ~ "debut_no_history",
+        n_history < min_train_pitches ~ "insufficient_history",
+        n_test < min_test_pitches ~ "insufficient_test_pitches",
+        TRUE ~ "evaluated"
+      )
+    )
+
+  # Track excluded pitchers
+  excluded <- pitcher_status %>%
+    filter(status != "evaluated") %>%
+    select(pitcher_id, n_history, n_test, status)
+
+  if (verbose && nrow(excluded) > 0) {
+    n_debut <- sum(excluded$status == "debut_no_history")
+    n_insufficient <- sum(excluded$status == "insufficient_history")
+    if (n_debut > 0) message("  ", n_debut, " pitcher(s) excluded: debut (no historical data)")
+    if (n_insufficient > 0) message("  ", n_insufficient, " pitcher(s) excluded: insufficient history (<", min_train_pitches, " pitches)")
+  }
+
+  # Get valid pitchers to evaluate
+  valid_pitchers <- pitcher_status %>%
+    filter(status == "evaluated") %>%
+    pull(pitcher_id)
 
   if (length(valid_pitchers) == 0) {
     warning("No pitchers with sufficient data in both history and test")
-    return(tibble(
-      pitcher_id = integer(),
-      n_history = integer(),
-      n_test = integer(),
-      mean_surp_model = numeric(),
-      mean_surp_base = numeric(),
-      unpredictability_ratio = numeric()
+    return(list(
+      results = tibble(
+        pitcher_id = integer(),
+        n_history = integer(),
+        n_test = integer(),
+        mean_surp_model = numeric(),
+        mean_surp_base = numeric(),
+        unpredictability_ratio = numeric()
+      ),
+      excluded = excluded
     ))
   }
 
@@ -737,7 +774,7 @@ evaluate_per_pitcher <- function(df_history,
     message("  Mean unpredictability ratio: ", round(mean(result_df$unpredictability_ratio), 4))
   }
 
-  result_df
+  list(results = result_df, excluded = excluded)
 }
 
 #' Get pitcher's last N pitches from historical data

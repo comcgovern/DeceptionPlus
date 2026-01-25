@@ -232,7 +232,7 @@ message("  History data: ", nrow(df_history), " pitches from ",
 
 message("\nEvaluating per-pitcher unpredictability...")
 
-per_pitcher_results <- evaluate_per_pitcher(
+eval_result <- evaluate_per_pitcher(
   df_history = df_history,
   df_test = df_test,
   min_train_pitches = MIN_HISTORY_PITCHES,
@@ -240,6 +240,10 @@ per_pitcher_results <- evaluate_per_pitcher(
   feature_names = FEATURE_NAMES,
   verbose = TRUE
 )
+
+# Extract results and excluded pitchers
+per_pitcher_results <- eval_result$results
+excluded_pitchers <- eval_result$excluded
 
 if (nrow(per_pitcher_results) == 0) {
   message("No pitchers with sufficient data to evaluate.")
@@ -261,29 +265,59 @@ per_pitcher_results <- per_pitcher_results %>%
                                 pmax(baseline_params$sd, 1e-12))
   )
 
-# Resolve pitcher names
+# Resolve pitcher names (for both evaluated and excluded pitchers)
 message("Resolving pitcher names...")
-all_pitcher_ids <- per_pitcher_results %>% dplyr::distinct(pitcher_id)
+all_pitcher_ids <- dplyr::bind_rows(
+  per_pitcher_results %>% dplyr::select(pitcher_id),
+  excluded_pitchers %>% dplyr::select(pitcher_id)
+) %>% dplyr::distinct()
+
 name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids,
                                                  cache_file = "cache/mlbam_name_cache.csv",
                                                  verbose = TRUE)
 
-# Create final output
-pitcher_ppi <- per_pitcher_results %>%
+# Create evaluated pitchers output
+evaluated_ppi <- per_pitcher_results %>%
   dplyr::left_join(name_map, by = "pitcher_id") %>%
   dplyr::mutate(
     pitcher_name = dplyr::if_else(is.na(pitcher_name),
                                    paste0("Pitcher_", pitcher_id),
                                    pitcher_name),
     total_pitches = n_history,
-    n_pitches_test = n_test
+    n_pitches_test = n_test,
+    status = "evaluated"
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, total_pitches, n_pitches_test,
     mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, predict_plus
+    unpredictability_ratio, predict_plus, status
   ) %>%
   dplyr::arrange(dplyr::desc(predict_plus))
+
+# Create excluded pitchers output (debuts, insufficient history)
+excluded_ppi <- excluded_pitchers %>%
+  dplyr::left_join(name_map, by = "pitcher_id") %>%
+  dplyr::mutate(
+    pitcher_name = dplyr::if_else(is.na(pitcher_name),
+                                   paste0("Pitcher_", pitcher_id),
+                                   pitcher_name),
+    total_pitches = n_history,
+    n_pitches_test = n_test,
+    mean_surp_model = NA_real_,
+    mean_surp_base = NA_real_,
+    ppi = NA_real_,
+    unpredictability_ratio = NA_real_,
+    predict_plus = NA_real_
+  ) %>%
+  dplyr::select(
+    pitcher_id, pitcher_name, total_pitches, n_pitches_test,
+    mean_surp_model, mean_surp_base, ppi,
+    unpredictability_ratio, predict_plus, status
+  )
+
+# Combine evaluated and excluded pitchers
+pitcher_ppi <- dplyr::bind_rows(evaluated_ppi, excluded_ppi) %>%
+  dplyr::arrange(dplyr::desc(predict_plus), status)
 
 # ============================================================================
 # SAVE RESULTS
@@ -302,6 +336,11 @@ res <- list(
   n_history_pitches = N_HISTORY_PITCHES
 )
 
+# Count evaluated vs excluded
+n_evaluated <- sum(pitcher_ppi$status == "evaluated")
+n_debuts <- sum(pitcher_ppi$status == "debut_no_history")
+n_insufficient <- sum(pitcher_ppi$status == "insufficient_history")
+
 # Save model metadata
 saveRDS(list(
   baseline_params = baseline_params,
@@ -311,7 +350,9 @@ saveRDS(list(
   n_history_pitches = N_HISTORY_PITCHES,
   min_history_pitches = MIN_HISTORY_PITCHES,
   feature_names = FEATURE_NAMES,
-  n_pitchers_evaluated = nrow(pitcher_ppi)
+  n_pitchers_evaluated = n_evaluated,
+  n_pitchers_debut = n_debuts,
+  n_pitchers_insufficient = n_insufficient
 ), OUT_MODEL)
 message("Model metadata saved: ", OUT_MODEL)
 
@@ -338,15 +379,21 @@ cat("  Daily Analysis Complete!\n")
 cat("============================================================\n")
 cat("Date:              ", as.character(TARGET_DATE), "\n")
 cat("Level:             ", LEVEL, "\n")
-cat("Pitchers Evaluated:", nrow(pitcher_ppi), "\n")
-cat("Total Test Pitches:", sum(pitcher_ppi$n_pitches_test), "\n")
+cat("Pitchers Evaluated:", n_evaluated, "\n")
+if (n_debuts > 0) {
+  cat("Debuts (no data):  ", n_debuts, "\n")
+}
+if (n_insufficient > 0) {
+  cat("Insufficient Hist: ", n_insufficient, " (<", MIN_HISTORY_PITCHES, " pitches)\n", sep = "")
+}
+cat("Total Test Pitches:", sum(pitcher_ppi$n_pitches_test, na.rm = TRUE), "\n")
 cat("Baseline:          μ=", round(baseline_params$mu, 4),
     " σ=", round(baseline_params$sd, 4), "\n")
 cat("\n")
 
-# Show top 5 and bottom 5 with >= MIN_PITCHES_SOCIAL
+# Show top 5 and bottom 5 with >= MIN_PITCHES_SOCIAL (only evaluated pitchers)
 qualified <- pitcher_ppi %>%
-  dplyr::filter(n_pitches_test >= MIN_PITCHES_SOCIAL)
+  dplyr::filter(status == "evaluated", n_pitches_test >= MIN_PITCHES_SOCIAL)
 
 if (nrow(qualified) > 0) {
   cat("Top 5 Least Predictable (>= ", MIN_PITCHES_SOCIAL, " pitches):\n", sep = "")
