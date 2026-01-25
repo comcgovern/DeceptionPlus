@@ -807,10 +807,56 @@ train_ppi <- function(train_start, train_end,
   
   # ========== STEP 6: Baseline predictions and surprise ==========
   if (verbose) message("📐 Computing baseline...")
-  
+
   P_base <- compute_baseline_probs(tr2, te2, baseline_type = baseline_type, baseline_keys = baseline_keys)
   p_true_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
   surp_base   <- -log(pmax(p_true_base, eps))
+
+  # ========== STEP 6b: Compute training baseline for standardization ==========
+  # We compute in-sample unpredictability ratios on training data to establish
+
+  # "league average" unpredictability. This makes test period scores comparable
+  # across different test dates (given the same training period).
+  if (verbose) message("📊 Computing training baseline for standardization...")
+
+  # In-sample predictions on training data
+  P_train <- as.matrix(predict(mod, newdata = tr2, type = "probs"))
+  if (!is.matrix(P_train)) {
+    P_train <- matrix(P_train, nrow = nrow(tr2), ncol = length(classes), dimnames = list(NULL, classes))
+  }
+
+  idx_true_train <- match(as.character(tr2$pitch_class), classes)
+  p_true_train <- P_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
+  surp_model_train <- -log(pmax(p_true_train, eps))
+
+  # Baseline for training data (in-sample)
+  P_base_train <- compute_baseline_probs(tr2, tr2, baseline_type = baseline_type, baseline_keys = baseline_keys)
+  p_true_base_train <- P_base_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
+  surp_base_train <- -log(pmax(p_true_base_train, eps))
+
+  # Per-pitcher aggregation for training data (for standardization reference)
+  per_pitcher_train <- tr2 %>%
+    select(pitcher_id) %>%
+    mutate(surp_model = surp_model_train, surp_base = surp_base_train) %>%
+    group_by(pitcher_id) %>%
+    summarise(
+      n_pitches_train = n(),
+      mean_surp_model = mean(surp_model),
+      mean_surp_base  = mean(surp_base),
+      .groups = "drop"
+    ) %>%
+    filter(n_pitches_train >= min_total_pitches) %>%
+    mutate(unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9))
+
+  # Compute standardization parameters from TRAINING population
+  # This establishes "league average" based on the training period
+  train_u_mu <- mean(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
+  train_u_sd <- sd(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
+
+  if (verbose) {
+    message("   Training baseline: μ=", round(train_u_mu, 4), " σ=", round(train_u_sd, 4))
+    message("   Based on ", nrow(per_pitcher_train), " pitchers in training period")
+  }
   
   # ========== STEP 7: Per-pitcher aggregation ==========
   if (verbose) message("👥 Aggregating by pitcher...")
@@ -845,7 +891,7 @@ train_ppi <- function(train_start, train_end,
   name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids, cache_file = "cache/mlbam_name_cache.csv", verbose = verbose)
   
   # ========== STEP 9: Calculate Predict+ ==========
-  # First join and filter to get the final population
+  # Join and filter to get the final population
   pitcher_ppi <- all_pitchers %>%
     left_join(per_pitcher_test, by = "pitcher_id") %>%
     left_join(name_map, by = "pitcher_id") %>%
@@ -853,14 +899,13 @@ train_ppi <- function(train_start, train_end,
     filter(!is.na(ppi)) %>%
     mutate(pitcher_name = if_else(is.na(pitcher_name), paste0("Pitcher_", pitcher_id), pitcher_name))
 
-  # Compute standardization on the FINAL filtered population
-  # This ensures mean Predict+ = 100 exactly for the output
-  u_mu <- mean(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
-  u_sd <- sd(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
-
+  # Standardize using TRAINING population parameters (train_u_mu, train_u_sd)
+  # This ensures scores are comparable across different test periods
+  # (given the same training baseline). Test mean won't be exactly 100,
+  # but scores are anchored to a stable reference population.
   pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      predict_plus = 100 + 10 * ((unpredictability_ratio - u_mu) / pmax(u_sd, 1e-12))
+      predict_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-12))
     ) %>%
     select(
       pitcher_id, pitcher_name, total_pitches, n_pitches_test,
@@ -886,7 +931,12 @@ train_ppi <- function(train_start, train_end,
        baseline_type = baseline_type,
        split_method = split_method,
        train_period = paste(train_start, "to", train_end),
-       test_period = if (split_method == "random") "random 50/50 split" else paste(test_start, "to", test_end))
+       test_period = if (split_method == "random") "random 50/50 split" else paste(test_start, "to", test_end),
+       standardization = list(
+         train_mean = train_u_mu,
+         train_sd = train_u_sd,
+         n_train_pitchers = nrow(per_pitcher_train)
+       ))
 }
 
 # ---------------------- Public API: train & save -----------------------------

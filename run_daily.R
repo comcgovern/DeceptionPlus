@@ -307,13 +307,55 @@ eps <- 1e-12
 p_true <- P[cbind(seq_len(nrow(te2)), idx_true)]
 surp_model <- -log(pmax(p_true, eps))
 
-# Baseline predictions
+# Baseline predictions for test data
 message("Computing baseline...")
 P_base <- compute_baseline_probs(tr2, te2, baseline_type = BASELINE_TYPE, baseline_keys = BASELINE_KEYS)
 p_true_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
 surp_base <- -log(pmax(p_true_base, eps))
 
-# Per-pitcher aggregation
+# ============================================================================
+# Compute training baseline for standardization
+# This ensures daily scores are comparable (anchored to training period)
+# ============================================================================
+message("Computing training baseline for standardization...")
+
+# In-sample predictions on training data
+P_train <- as.matrix(predict(mod, newdata = tr2, type = "probs"))
+if (!is.matrix(P_train)) {
+  P_train <- matrix(P_train, nrow = nrow(tr2), ncol = length(classes), dimnames = list(NULL, classes))
+}
+
+idx_true_train <- match(as.character(tr2$pitch_class), classes)
+p_true_train <- P_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
+surp_model_train <- -log(pmax(p_true_train, eps))
+
+# Baseline for training data
+P_base_train <- compute_baseline_probs(tr2, tr2, baseline_type = BASELINE_TYPE, baseline_keys = BASELINE_KEYS)
+p_true_base_train <- P_base_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
+surp_base_train <- -log(pmax(p_true_base_train, eps))
+
+# Per-pitcher aggregation for training data
+per_pitcher_train <- tr2 %>%
+  dplyr::select(pitcher_id) %>%
+  dplyr::mutate(surp_model = surp_model_train, surp_base = surp_base_train) %>%
+  dplyr::group_by(pitcher_id) %>%
+  dplyr::summarise(
+    n_pitches_train = dplyr::n(),
+    mean_surp_model = mean(surp_model),
+    mean_surp_base  = mean(surp_base),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(n_pitches_train >= 50) %>%
+  dplyr::mutate(unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9))
+
+# Standardization parameters from TRAINING population
+train_u_mu <- mean(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
+train_u_sd <- sd(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
+
+message("  Training baseline: mu=", round(train_u_mu, 4), " sd=", round(train_u_sd, 4),
+        " (", nrow(per_pitcher_train), " pitchers)")
+
+# Per-pitcher aggregation for test data
 message("Aggregating by pitcher...")
 per_pitcher_test <- te2 %>%
   dplyr::select(pitcher_id) %>%
@@ -347,17 +389,15 @@ name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids,
                                                  cache_file = "cache/mlbam_name_cache.csv",
                                                  verbose = TRUE)
 
-# Calculate Predict+
-u_mu <- mean(per_pitcher_test$unpredictability_ratio, na.rm = TRUE)
-u_sd <- sd(per_pitcher_test$unpredictability_ratio, na.rm = TRUE)
-
+# Calculate Predict+ using TRAINING baseline for standardization
+# This makes scores comparable across different days
 pitcher_ppi <- all_pitchers %>%
   dplyr::left_join(per_pitcher_test, by = "pitcher_id") %>%
   dplyr::left_join(name_map, by = "pitcher_id") %>%
   dplyr::filter(!is.na(ppi)) %>%
   dplyr::mutate(
     pitcher_name = dplyr::if_else(is.na(pitcher_name), paste0("Pitcher_", pitcher_id), pitcher_name),
-    predict_plus = 100 + 10 * ((unpredictability_ratio - u_mu) / pmax(u_sd, 1e-12))
+    predict_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-12))
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, total_pitches, n_pitches_test,
@@ -395,7 +435,12 @@ saveRDS(list(
   split_method = "temporal",
   train_description = TRAINING_DESCRIPTION,
   test_date = as.character(TARGET_DATE),
-  level = LEVEL
+  level = LEVEL,
+  standardization = list(
+    train_mean = train_u_mu,
+    train_sd = train_u_sd,
+    n_train_pitchers = nrow(per_pitcher_train)
+  )
 ), OUT_MODEL)
 message("Model saved: ", OUT_MODEL)
 
