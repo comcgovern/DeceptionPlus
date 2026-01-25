@@ -734,9 +734,9 @@ train_ppi <- function(train_start, train_end,
     df_test <- engineer_features(raw_test)
     if (nrow(df_test) == 0) stop("No usable test rows after feature engineering.")
     df_test <- df_test %>% filter(!is.na(pitcher_id))
+
+    if (verbose) message("Test data: ", nrow(df_test), " pitches from ", length(unique(df_test$pitcher_id)), " pitchers")
   }
-  
-  if (verbose) message("Test data: ", nrow(df_test), " pitches from ", length(unique(df_test$pitcher_id)), " pitchers")
   
   # ========== STEP 3: Prepare training data and fit model ==========
   if (verbose) message("\n🔧 Fitting multinomial model...")
@@ -845,16 +845,21 @@ train_ppi <- function(train_start, train_end,
   name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids, cache_file = "cache/mlbam_name_cache.csv", verbose = verbose)
   
   # ========== STEP 9: Calculate Predict+ ==========
-  u_mu  <- mean(per_pitcher_test$unpredictability_ratio, na.rm = TRUE)
-  u_sd  <- sd(per_pitcher_test$unpredictability_ratio, na.rm = TRUE)
-  
+  # First join and filter to get the final population
   pitcher_ppi <- all_pitchers %>%
     left_join(per_pitcher_test, by = "pitcher_id") %>%
     left_join(name_map, by = "pitcher_id") %>%
     filter(total_pitches >= min_total_pitches) %>%
     filter(!is.na(ppi)) %>%
+    mutate(pitcher_name = if_else(is.na(pitcher_name), paste0("Pitcher_", pitcher_id), pitcher_name))
+
+  # Compute standardization on the FINAL filtered population
+  # This ensures mean Predict+ = 100 exactly for the output
+  u_mu <- mean(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
+  u_sd <- sd(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
+
+  pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      pitcher_name = if_else(is.na(pitcher_name), paste0("Pitcher_", pitcher_id), pitcher_name),
       predict_plus = 100 + 10 * ((unpredictability_ratio - u_mu) / pmax(u_sd, 1e-12))
     ) %>%
     select(
