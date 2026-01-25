@@ -586,6 +586,187 @@ resolve_pitcher_names_with_fallback <- function(df_with_ids,
   map_api
 }
 
+# ---------------------- Per-Pitcher Model Evaluation --------------------------
+#' Evaluate pitcher unpredictability using per-pitcher models
+#'
+#' For each pitcher, trains a multinomial model on their historical pitches
+#' and evaluates surprise on their test pitches. This measures how unpredictable
+#' each pitcher is relative to their OWN patterns, not league-wide patterns.
+#'
+#' @param df_history Historical data for training (e.g., last 500 pitches per pitcher)
+#' @param df_test Test data to evaluate (e.g., today's pitches)
+#' @param min_train_pitches Minimum training pitches per pitcher (default: 100)
+#' @param min_test_pitches Minimum test pitches per pitcher (default: 10)
+#' @param feature_names Features to use in per-pitcher models
+#' @param verbose Print progress messages
+#' @return Data frame with per-pitcher unpredictability metrics
+evaluate_per_pitcher <- function(df_history,
+                                  df_test,
+                                  min_train_pitches = 100,
+                                  min_test_pitches = 10,
+                                  feature_names = c("balls", "strikes", "two_strikes",
+                                                    "ahead_in_count", "outs", "is_risp",
+                                                    "stand", "last_pitch_type"),
+                                  verbose = TRUE) {
+
+  # Prepare factor columns for history data
+  df_history <- df_history %>%
+    mutate(
+      pitch_class = factor(pitch_class),
+      stand = na_safe_factor(stand),
+      p_throws = na_safe_factor(p_throws),
+      last_pitch_type = na_safe_factor(last_pitch_type)
+    )
+
+  # Prepare factor columns for test data
+  df_test <- df_test %>%
+    mutate(
+      pitch_class = factor(pitch_class),
+      stand = na_safe_factor(stand),
+      p_throws = na_safe_factor(p_throws),
+      last_pitch_type = na_safe_factor(last_pitch_type)
+    )
+
+  # Get pitchers with enough data in both history and test
+  history_counts <- df_history %>%
+    group_by(pitcher_id) %>%
+    summarise(n_history = n(), .groups = "drop") %>%
+    filter(n_history >= min_train_pitches)
+
+  test_counts <- df_test %>%
+    group_by(pitcher_id) %>%
+    summarise(n_test = n(), .groups = "drop") %>%
+    filter(n_test >= min_test_pitches)
+
+  valid_pitchers <- intersect(history_counts$pitcher_id, test_counts$pitcher_id)
+
+  if (length(valid_pitchers) == 0) {
+    warning("No pitchers with sufficient data in both history and test")
+    return(tibble(
+      pitcher_id = integer(),
+      n_history = integer(),
+      n_test = integer(),
+      mean_surp_model = numeric(),
+      mean_surp_base = numeric(),
+      unpredictability_ratio = numeric()
+    ))
+  }
+
+  if (verbose) message("Evaluating ", length(valid_pitchers), " pitchers with per-pitcher models...")
+
+  eps <- 1e-12
+  results <- vector("list", length(valid_pitchers))
+
+  for (i in seq_along(valid_pitchers)) {
+    pid <- valid_pitchers[i]
+
+    # Get this pitcher's data
+    ptr_history <- df_history %>% filter(pitcher_id == pid)
+    ptr_test <- df_test %>% filter(pitcher_id == pid)
+
+    # Prepare features for this pitcher's historical data
+    pf_tr <- prepare_features(ptr_history, feature_names)
+    tr2 <- pf_tr$data
+    feats <- pf_tr$features
+
+    # Align test data with training pitch class levels
+    ptr_test <- ptr_test %>%
+      mutate(pitch_class = factor(pitch_class, levels = levels(tr2$pitch_class)))
+
+    # Drop test rows with unseen pitch classes
+    ptr_test <- ptr_test %>% filter(!is.na(pitch_class))
+    if (nrow(ptr_test) == 0) next
+
+    te2 <- ptr_test
+    if (length(feats) > 0) {
+      for (nm in feats) {
+        if (nm %in% names(te2)) {
+          res <- clean_one_feature(te2[[nm]])
+          te2[[nm]] <- res$v
+        }
+      }
+    }
+
+    # Check we have enough pitch classes to fit model
+    if (nlevels(droplevels(tr2$pitch_class)) < 2) next
+
+    # Fit per-pitcher multinomial model
+    form <- if (length(feats) == 0) as.formula("pitch_class ~ 1")
+            else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
+
+    mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200), silent = TRUE)
+    if (inherits(mod, "try-error")) next
+
+    classes <- levels(tr2$pitch_class)
+
+    # Model predictions on test data
+    P <- as.matrix(predict(mod, newdata = te2, type = "probs"))
+    if (!is.matrix(P)) {
+      P <- matrix(P, nrow = nrow(te2), ncol = length(classes), dimnames = list(NULL, classes))
+    }
+
+    idx_true <- match(as.character(te2$pitch_class), classes)
+    if (any(is.na(idx_true))) next
+
+    p_true <- P[cbind(seq_len(nrow(te2)), idx_true)]
+    surp_model <- -log(pmax(p_true, eps))
+
+    # Baseline: pitcher's own marginal pitch frequencies from history
+    # This represents "how surprising is this pitch given the pitcher's overall arsenal?"
+    pitch_freqs <- table(tr2$pitch_class)
+    pitch_probs <- (pitch_freqs + 1) / sum(pitch_freqs + 1)  # Add-1 smoothing
+
+    p_base <- pitch_probs[as.character(te2$pitch_class)]
+    surp_base <- -log(pmax(as.numeric(p_base), eps))
+
+    # Aggregate for this pitcher
+    results[[i]] <- tibble(
+      pitcher_id = pid,
+      n_history = nrow(ptr_history),
+      n_test = nrow(ptr_test),
+      mean_surp_model = mean(surp_model),
+      mean_surp_base = mean(surp_base),
+      unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps)
+    )
+  }
+
+  result_df <- bind_rows(results)
+
+  if (verbose && nrow(result_df) > 0) {
+    message("  Successfully evaluated ", nrow(result_df), " pitchers")
+    message("  Mean unpredictability ratio: ", round(mean(result_df$unpredictability_ratio), 4))
+  }
+
+  result_df
+}
+
+#' Get pitcher's last N pitches from historical data
+#'
+#' @param df_all All available pitch data
+#' @param pitcher_ids Vector of pitcher IDs to retrieve
+#' @param n_pitches Number of most recent pitches per pitcher (default: 500)
+#' @return Data frame with last N pitches for each pitcher
+get_pitcher_history <- function(df_all, pitcher_ids, n_pitches = 500) {
+  df_all %>%
+    filter(pitcher_id %in% pitcher_ids) %>%
+    arrange(pitcher_id, desc(game_date), desc(game_pk), desc(at_bat_number), desc(pitch_number)) %>%
+    group_by(pitcher_id) %>%
+    slice_head(n = n_pitches) %>%
+    ungroup()
+}
+
+#' Load baseline parameters for standardization
+#'
+#' @param baseline_file Path to baseline_params.rds file
+#' @return List with mu, sd, and metadata
+load_baseline_params <- function(baseline_file = "baseline_params.rds") {
+  if (!file.exists(baseline_file)) {
+    stop("Baseline file not found: ", baseline_file, "\n",
+         "Run compute_baseline.R to generate baseline parameters.")
+  }
+  readRDS(baseline_file)
+}
+
 # ---------------------- Train / Evaluate / PPI -------------------------------
 train_ppi <- function(train_start, train_end,
                       test_start = NULL, test_end = NULL,

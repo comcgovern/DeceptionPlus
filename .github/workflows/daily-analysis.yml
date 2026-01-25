@@ -2,11 +2,13 @@
 # Daily Predict+ Analysis Workflow
 # ============================================================================
 # Runs at 1:00 AM UTC daily to analyze the previous day's MLB games.
-# Outputs CSV results and social media graphics.
+# Uses per-pitcher models: each pitcher evaluated against their own patterns.
 #
-# Training data logic:
-#   - Before May 1: Previous season + current season through yesterday
-#   - May 1 onwards: Current season only
+# Approach:
+#   1. Load each pitcher's last 500 pitches as training data
+#   2. Train individual model per pitcher
+#   3. Evaluate today's pitches against their own model
+#   4. Standardize using fixed baseline (baseline_params.rds)
 #
 # Outputs are committed back to the repository in:
 #   output/{year}/{month}/{day}.csv
@@ -88,6 +90,18 @@ jobs:
           key: statcast-cache-${{ github.run_number }}
           restore-keys: |
             statcast-cache-
+
+      - name: Check for baseline parameters
+        id: baseline
+        run: |
+          if [ -f "baseline_params.rds" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Baseline parameters file found"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Warning: baseline_params.rds not found. Run compute_baseline.R first."
+            echo "Daily analysis will use fallback values."
+          fi
 
       - name: Determine analysis date
         id: date
