@@ -1,0 +1,193 @@
+# ============================================================================
+# Daily Predict+ Analysis Workflow
+# ============================================================================
+# Runs at 1:00 AM UTC daily to analyze the previous day's MLB games.
+# Outputs CSV results and social media graphics.
+#
+# Training data logic:
+#   - Before May 1: Previous season + current season through yesterday
+#   - May 1 onwards: Current season only
+#
+# Outputs are committed back to the repository in:
+#   output/{year}/{month}/{day}.csv
+#   output/{year}/{month}/visualizations/
+# ============================================================================
+
+name: Daily Predict+ Analysis
+
+on:
+  # Run at 1:00 AM UTC daily
+  schedule:
+    - cron: '0 1 * * *'
+
+  # Allow manual trigger with optional date override
+  workflow_dispatch:
+    inputs:
+      analysis_date:
+        description: 'Date to analyze (YYYY-MM-DD). Leave empty for yesterday.'
+        required: false
+        default: ''
+      level:
+        description: 'Level to analyze (MLB or AAA)'
+        required: false
+        default: 'MLB'
+
+# Prevent concurrent runs
+concurrency:
+  group: daily-analysis
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    # Only run during MLB season (roughly March 20 - October 31)
+    # The job will gracefully handle off-days
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for commits
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3.0'
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ hashFiles('**/DESCRIPTION') }}
+          restore-keys: |
+            ${{ runner.os }}-r-
+
+      - name: Install R packages
+        run: |
+          install.packages(c(
+            "dplyr", "tidyr", "purrr", "stringr", "lubridate",
+            "nnet", "readr", "tibble", "forcats",
+            "httr", "jsonlite", "ggplot2", "scales"
+          ), repos = "https://cloud.r-project.org")
+
+          # Install sabRmetrics from GitHub
+          install.packages("remotes")
+          remotes::install_github("sportsdataverse/sabRmetrics", quiet = TRUE)
+        shell: Rscript {0}
+
+      - name: Cache Statcast data
+        uses: actions/cache@v4
+        with:
+          path: cache/
+          key: statcast-cache-${{ github.run_number }}
+          restore-keys: |
+            statcast-cache-
+
+      - name: Determine analysis date
+        id: date
+        run: |
+          if [ -n "${{ github.event.inputs.analysis_date }}" ]; then
+            echo "date=${{ github.event.inputs.analysis_date }}" >> $GITHUB_OUTPUT
+          else
+            # Yesterday in UTC
+            echo "date=$(date -u -d 'yesterday' '+%Y-%m-%d')" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "${{ github.event.inputs.level }}" ]; then
+            echo "level=${{ github.event.inputs.level }}" >> $GITHUB_OUTPUT
+          else
+            echo "level=MLB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run daily analysis
+        id: analysis
+        run: |
+          Rscript run_daily.R ${{ steps.date.outputs.date }} --level ${{ steps.date.outputs.level }}
+        continue-on-error: true
+
+      - name: Check for outputs
+        id: check_outputs
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+          YEAR=$(date -d "$DATE" '+%Y')
+          MONTH=$(date -d "$DATE" '+%B' | tr '[:upper:]' '[:lower:]')
+          DAY=$(date -d "$DATE" '+%d')
+
+          CSV_PATH="output/${YEAR}/${MONTH}/${DAY}.csv"
+
+          if [ -f "$CSV_PATH" ]; then
+            echo "has_output=true" >> $GITHUB_OUTPUT
+            echo "csv_path=$CSV_PATH" >> $GITHUB_OUTPUT
+            echo "year=$YEAR" >> $GITHUB_OUTPUT
+            echo "month=$MONTH" >> $GITHUB_OUTPUT
+          else
+            echo "has_output=false" >> $GITHUB_OUTPUT
+            echo "No games found for $DATE (likely an off-day)"
+          fi
+
+      - name: Commit and push results
+        if: steps.check_outputs.outputs.has_output == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          DATE="${{ steps.date.outputs.date }}"
+          LEVEL="${{ steps.date.outputs.level }}"
+
+          # Add output files
+          git add output/ cache/mlbam_name_cache.csv models/ || true
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Daily analysis: ${LEVEL} ${DATE}
+
+            - Added ${LEVEL} Predict+ analysis for ${DATE}
+            - Generated social media graphics
+            - Updated pitcher name cache"
+
+            git push
+          fi
+
+      - name: Create summary
+        if: always()
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+          LEVEL="${{ steps.date.outputs.level }}"
+
+          echo "## Daily Predict+ Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** ${DATE}" >> $GITHUB_STEP_SUMMARY
+          echo "**Level:** ${LEVEL}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.check_outputs.outputs.has_output }}" == "true" ]; then
+            CSV="${{ steps.check_outputs.outputs.csv_path }}"
+            PITCHERS=$(wc -l < "$CSV")
+            PITCHERS=$((PITCHERS - 1))  # Subtract header
+
+            echo "**Status:** Success" >> $GITHUB_STEP_SUMMARY
+            echo "**Pitchers analyzed:** ${PITCHERS}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Output Files" >> $GITHUB_STEP_SUMMARY
+            echo "- CSV: \`${CSV}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Visualizations: \`output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/visualizations/\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** No games found (off-day or no data)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload artifacts
+        if: steps.check_outputs.outputs.has_output == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-analysis-${{ steps.date.outputs.date }}
+          path: |
+            output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/
+          retention-days: 30

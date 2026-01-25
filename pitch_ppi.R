@@ -588,7 +588,7 @@ resolve_pitcher_names_with_fallback <- function(df_with_ids,
 
 # ---------------------- Train / Evaluate / PPI -------------------------------
 train_ppi <- function(train_start, train_end,
-                      test_start, test_end,
+                      test_start = NULL, test_end = NULL,
                       min_test_pitches = 10,
                       min_total_pitches = 50,
                       feature_names = c("balls","strikes","two_strikes","ahead_in_count",
@@ -600,61 +600,141 @@ train_ppi <- function(train_start, train_end,
                       baseline_type = "conditional",
                       train_game_type = "R",
                       test_game_type = "R",
+                      split_method = "temporal",
+                      random_seed = NULL,
                       verbose = TRUE) {
-  
+
+  # Validate split_method
+  if (!split_method %in% c("temporal", "random")) {
+    stop("split_method must be 'temporal' or 'random'")
+  }
+
+  # For temporal split, test dates are required
+  if (split_method == "temporal" && (is.null(test_start) || is.null(test_end))) {
+    stop("For temporal split, test_start and test_end are required")
+  }
+
+  # For random split, use train dates as the period of interest
+  if (split_method == "random") {
+    test_start <- train_start
+    test_end <- train_end
+    test_game_type <- train_game_type
+    if (verbose) message("Using random split: 50% of each pitcher's pitches for train/test")
+  }
+
   ensure_directories()
-  
-  # ========== STEP 1: Load TRAINING data ==========
-  if (verbose) {
-    message("\n========================================")
-    message("TRAINING PERIOD: ", train_start, " to ", train_end)
-    message("========================================")
+
+  # Set random seed if provided (for reproducibility)
+  if (!is.null(random_seed)) {
+    set.seed(random_seed)
+    if (verbose) message("Random seed set to: ", random_seed)
   }
-  
-  train_level <- if (exists("TRAIN_LEVEL")) TRAIN_LEVEL else "MLB"
-  train_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", train_start, train_end, train_game_type, train_level)
-  if (file.exists(train_cachefile)) {
-    message("✅ Using cached training data: ", train_cachefile)
-    raw_train <- readRDS(train_cachefile)
+
+  # ========== STEP 1: Load data ==========
+  if (split_method == "random") {
+    # RANDOM SPLIT: Load all data for period, then split by pitcher
+    if (verbose) {
+      message("\n========================================")
+      message("RANDOM SPLIT MODE")
+      message("PERIOD: ", train_start, " to ", train_end)
+      message("========================================")
+    }
+
+    train_level <- if (exists("TRAIN_LEVEL")) TRAIN_LEVEL else "MLB"
+    cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", train_start, train_end, train_game_type, train_level)
+    if (file.exists(cachefile)) {
+      message("✅ Using cached data: ", cachefile)
+      raw_all <- readRDS(cachefile)
+    } else {
+      message("⬇️ Downloading data...")
+      raw_all <- load_statcast_range(train_start, train_end, game_type = train_game_type, level = train_level, verbose = verbose)
+      if (nrow(raw_all) > 0) {
+        saveRDS(raw_all, cachefile)
+        message("💾 Cached data to ", cachefile)
+      } else stop("No data found for the given range.")
+    }
+
+    df_all <- engineer_features(raw_all)
+    if (nrow(df_all) == 0) stop("No usable rows after feature engineering.")
+    df_all <- df_all %>% filter(!is.na(pitcher_id))
+
+    if (verbose) message("Total data: ", nrow(df_all), " pitches from ", length(unique(df_all$pitcher_id)), " pitchers")
+
+    # Perform random split: 50% of each pitcher's pitches to train, 50% to test
+    if (verbose) message("🎲 Performing random 50/50 split per pitcher...")
+
+    df_all <- df_all %>%
+      group_by(pitcher_id) %>%
+      mutate(
+        pitch_row = row_number(),
+        n_total = n(),
+        random_order = sample(n()),
+        is_train = random_order <= ceiling(n() / 2)
+      ) %>%
+      ungroup()
+
+    df_train <- df_all %>% filter(is_train) %>% select(-pitch_row, -n_total, -random_order, -is_train)
+    df_test <- df_all %>% filter(!is_train) %>% select(-pitch_row, -n_total, -random_order, -is_train)
+
+    if (verbose) {
+      message("Training data: ", nrow(df_train), " pitches from ", length(unique(df_train$pitcher_id)), " pitchers")
+      message("Test data: ", nrow(df_test), " pitches from ", length(unique(df_test$pitcher_id)), " pitchers")
+    }
+
   } else {
-    message("⬇️ Downloading training data...")
-    raw_train <- load_statcast_range(train_start, train_end, game_type = train_game_type, level = train_level, verbose = verbose)
-    if (nrow(raw_train) > 0) { 
-      saveRDS(raw_train, train_cachefile)
-      message("💾 Cached training data to ", train_cachefile)
-    } else stop("No training data found for the given range.")
+    # TEMPORAL SPLIT: Load separate train and test data
+    if (verbose) {
+      message("\n========================================")
+      message("TEMPORAL SPLIT MODE")
+      message("TRAINING PERIOD: ", train_start, " to ", train_end)
+      message("========================================")
+    }
+
+    train_level <- if (exists("TRAIN_LEVEL")) TRAIN_LEVEL else "MLB"
+    train_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", train_start, train_end, train_game_type, train_level)
+    if (file.exists(train_cachefile)) {
+      message("✅ Using cached training data: ", train_cachefile)
+      raw_train <- readRDS(train_cachefile)
+    } else {
+      message("⬇️ Downloading training data...")
+      raw_train <- load_statcast_range(train_start, train_end, game_type = train_game_type, level = train_level, verbose = verbose)
+      if (nrow(raw_train) > 0) {
+        saveRDS(raw_train, train_cachefile)
+        message("💾 Cached training data to ", train_cachefile)
+      } else stop("No training data found for the given range.")
+    }
+
+    df_train <- engineer_features(raw_train)
+    if (nrow(df_train) == 0) stop("No usable training rows after feature engineering.")
+    df_train <- df_train %>% filter(!is.na(pitcher_id))
+
+    if (verbose) message("Training data: ", nrow(df_train), " pitches from ", length(unique(df_train$pitcher_id)), " pitchers")
+
+    # ========== Load TEST data ==========
+    if (verbose) {
+      message("\n========================================")
+      message("TEST PERIOD: ", test_start, " to ", test_end)
+      message("========================================")
+    }
+
+    test_level <- if (exists("TEST_LEVEL")) TEST_LEVEL else "MLB"
+    test_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", test_start, test_end, test_game_type, test_level)
+    if (file.exists(test_cachefile)) {
+      message("✅ Using cached test data: ", test_cachefile)
+      raw_test <- readRDS(test_cachefile)
+    } else {
+      message("⬇️ Downloading test data...")
+      raw_test <- load_statcast_range(test_start, test_end, game_type = test_game_type, level = test_level, verbose = verbose)
+      if (nrow(raw_test) > 0) {
+        saveRDS(raw_test, test_cachefile)
+        message("💾 Cached test data to ", test_cachefile)
+      } else stop("No test data found for the given range.")
+    }
+
+    df_test <- engineer_features(raw_test)
+    if (nrow(df_test) == 0) stop("No usable test rows after feature engineering.")
+    df_test <- df_test %>% filter(!is.na(pitcher_id))
   }
-  
-  df_train <- engineer_features(raw_train)
-  if (nrow(df_train) == 0) stop("No usable training rows after feature engineering.")
-  df_train <- df_train %>% filter(!is.na(pitcher_id))
-  
-  if (verbose) message("Training data: ", nrow(df_train), " pitches from ", length(unique(df_train$pitcher_id)), " pitchers")
-  
-  # ========== STEP 2: Load TEST data ==========
-  if (verbose) {
-    message("\n========================================")
-    message("TEST PERIOD: ", test_start, " to ", test_end)
-    message("========================================")
-  }
-  
-  test_level <- if (exists("TEST_LEVEL")) TEST_LEVEL else "MLB"
-  test_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", test_start, test_end, test_game_type, test_level)
-  if (file.exists(test_cachefile)) {
-    message("✅ Using cached test data: ", test_cachefile)
-    raw_test <- readRDS(test_cachefile)
-  } else {
-    message("⬇️ Downloading test data...")
-    raw_test <- load_statcast_range(test_start, test_end, game_type = test_game_type, level = test_level, verbose = verbose)
-    if (nrow(raw_test) > 0) {
-      saveRDS(raw_test, test_cachefile)
-      message("💾 Cached test data to ", test_cachefile)
-    } else stop("No test data found for the given range.")
-  }
-  
-  df_test <- engineer_features(raw_test)
-  if (nrow(df_test) == 0) stop("No usable test rows after feature engineering.")
-  df_test <- df_test %>% filter(!is.na(pitcher_id))
   
   if (verbose) message("Test data: ", nrow(df_test), " pitches from ", length(unique(df_test$pitcher_id)), " pitchers")
   
@@ -799,13 +879,14 @@ train_ppi <- function(train_start, train_end,
        features_used = feats,
        baseline_keys = baseline_keys,
        baseline_type = baseline_type,
+       split_method = split_method,
        train_period = paste(train_start, "to", train_end),
-       test_period = paste(test_start, "to", test_end))
+       test_period = if (split_method == "random") "random 50/50 split" else paste(test_start, "to", test_end))
 }
 
 # ---------------------- Public API: train & save -----------------------------
 train_and_save <- function(train_start, train_end,
-                           test_start, test_end,
+                           test_start = NULL, test_end = NULL,
                            min_test_pitches = 10,
                            min_total_pitches = 50,
                            feature_names = c("balls","strikes","two_strikes","ahead_in_count",
@@ -817,10 +898,12 @@ train_and_save <- function(train_start, train_end,
                            baseline_type = "conditional",
                            train_game_type = "R",
                            test_game_type = "R",
+                           split_method = "temporal",
+                           random_seed = NULL,
                            out_model = "models/ppi_model.rds",
                            out_ppi   = "output/pitcher_ppi.csv",
                            verbose   = TRUE) {
-  
+
   res <- train_ppi(train_start, train_end,
                    test_start, test_end,
                    min_test_pitches = min_test_pitches,
@@ -830,6 +913,8 @@ train_and_save <- function(train_start, train_end,
                    baseline_type = baseline_type,
                    train_game_type = train_game_type,
                    test_game_type = test_game_type,
+                   split_method = split_method,
+                   random_seed = random_seed,
                    verbose = verbose)
   
   saveRDS(list(
@@ -837,6 +922,7 @@ train_and_save <- function(train_start, train_end,
     features_used = res$features_used,
     baseline_keys = res$baseline_keys,
     baseline_type = res$baseline_type,
+    split_method = split_method,
     train_start = train_start,
     train_end = train_end,
     test_start = test_start,
@@ -940,6 +1026,122 @@ create_visualizations <- function(res, output_dir = "output/visualizations") {
   invisible(list(p1 = p1, p2 = p2, p3 = p3, p4 = p4))
 }
 
+# ---------------------- Social Media Visualizations ---------------------------
+create_social_media_graphics <- function(res,
+                                          game_date,
+                                          min_pitches = 25,
+                                          output_dir = "output/visualizations",
+                                          top_n = 5) {
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    warning("ggplot2 not available; skipping social media visualizations")
+    return(invisible(NULL))
+  }
+
+  library(ggplot2)
+
+  # Filter pitchers with minimum pitches in test (the day's data)
+  qualified <- res$pitcher_ppi %>%
+    filter(n_pitches_test >= min_pitches)
+
+  if (nrow(qualified) == 0) {
+    warning("No pitchers with >= ", min_pitches, " pitches found")
+    return(invisible(NULL))
+  }
+
+  # Format date for display
+  date_display <- format(as.Date(game_date), "%B %d, %Y")
+  date_short <- format(as.Date(game_date), "%Y-%m-%d")
+
+  # Custom theme for social media
+  theme_social <- function() {
+    theme_minimal(base_size = 16) +
+      theme(
+        plot.title = element_text(face = "bold", size = 22, hjust = 0.5, color = "#1a1a2e"),
+        plot.subtitle = element_text(size = 14, hjust = 0.5, color = "#555555"),
+        plot.caption = element_text(size = 10, color = "#888888", hjust = 1),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 14, face = "bold", color = "#333333"),
+        axis.text.x = element_text(size = 12, color = "#555555"),
+        axis.title = element_text(size = 14, color = "#555555"),
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.margin = margin(20, 20, 20, 20)
+      )
+  }
+
+  # Top 5 Least Predictable (highest Predict+)
+  top_unpred <- qualified %>%
+    arrange(desc(predict_plus)) %>%
+    head(top_n) %>%
+    mutate(
+      pitcher_name = reorder(pitcher_name, predict_plus),
+      label = sprintf("%.0f", predict_plus),
+      bar_color = scales::col_numeric(
+        palette = c("#4361ee", "#3a0ca3"),
+        domain = range(predict_plus)
+      )(predict_plus)
+    )
+
+  p_top <- ggplot(top_unpred, aes(x = predict_plus, y = pitcher_name)) +
+    geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
+    geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
+    geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
+    scale_fill_gradient(low = "#4361ee", high = "#7209b7") +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(
+      title = "Least Predictable Pitchers",
+      subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+      x = "Predict+",
+      y = NULL,
+      caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus"
+    ) +
+    theme_social()
+
+  ggsave(
+    file.path(output_dir, sprintf("social_top%d_unpredictable_%s.png", top_n, date_short)),
+    p_top, width = 10, height = 6, dpi = 300
+  )
+
+  # Bottom 5 Most Predictable (lowest Predict+)
+  top_pred <- qualified %>%
+    arrange(predict_plus) %>%
+    head(top_n) %>%
+    mutate(
+      pitcher_name = reorder(pitcher_name, -predict_plus),
+      label = sprintf("%.0f", predict_plus),
+      bar_color = scales::col_numeric(
+        palette = c("#e63946", "#f4a261"),
+        domain = range(predict_plus)
+      )(predict_plus)
+    )
+
+  p_bottom <- ggplot(top_pred, aes(x = predict_plus, y = pitcher_name)) +
+    geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
+    geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
+    geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
+    scale_fill_gradient(low = "#e63946", high = "#f4a261") +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(
+      title = "Most Predictable Pitchers",
+      subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
+      x = "Predict+",
+      y = NULL,
+      caption = "Lower = More Predictable | 100 = League Average | @PredictPlus"
+    ) +
+    theme_social()
+
+  ggsave(
+    file.path(output_dir, sprintf("social_top%d_predictable_%s.png", top_n, date_short)),
+    p_bottom, width = 10, height = 6, dpi = 300
+  )
+
+  message("✅ Created social media graphics in ", output_dir)
+  invisible(list(top_unpredictable = p_top, top_predictable = p_bottom))
+}
+
 # ---------------------- CLI --------------------------------------------------
 parse_csv_list <- function(x) { if (is.null(x) || is.na(x) || x == "") return(character(0)); trimws(unlist(strsplit(x, ","))) }
 
@@ -963,9 +1165,17 @@ if (length(args) > 0) {
   test_game_type <- get_arg("--test_game_type", "R")
   features  <- parse_csv_list(feat_str); base_keys <- parse_csv_list(base_str)
   
-  if (is.null(train_start) || is.null(train_end) || is.null(test_start) || is.null(test_end)) {
+  split_method <- get_arg("--split_method", "temporal")
+  random_seed_str <- get_arg("--random_seed", NA)
+  random_seed <- if (is.na(random_seed_str)) NULL else suppressWarnings(as.integer(random_seed_str))
+
+  # For temporal split, test dates are required; for random split, they're optional
+  if (split_method == "temporal" && (is.null(test_start) || is.null(test_end))) {
     stop("Usage: Rscript pitch_ppi.R --train_start YYYY-MM-DD --train_end YYYY-MM-DD --test_start YYYY-MM-DD --test_end YYYY-MM-DD [options]\n",
+         "       Rscript pitch_ppi.R --train_start YYYY-MM-DD --train_end YYYY-MM-DD --split_method random [options]\n",
          "Options:\n",
+         "  --split_method METHOD    temporal/random (default: temporal)\n",
+         "  --random_seed N          Random seed for reproducibility (random split only)\n",
          "  --min_test_pitches N     Minimum pitches in test period (default: 10)\n",
          "  --min_total_pitches N    Minimum total pitches (default: 50)\n",
          "  --baseline_type TYPE     marginal/conditional/hybrid (default: conditional)\n",
@@ -973,6 +1183,10 @@ if (length(args) > 0) {
          "  --test_game_type TYPE    R/P/S/W (default: R)\n",
          "  --out_model PATH         Output model path\n",
          "  --out_ppi PATH           Output CSV path\n")
+  }
+
+  if (is.null(train_start) || is.null(train_end)) {
+    stop("Usage: Rscript pitch_ppi.R --train_start YYYY-MM-DD --train_end YYYY-MM-DD [options]\n")
   }
   
   res <- train_and_save(
@@ -985,6 +1199,8 @@ if (length(args) > 0) {
     baseline_type = baseline_type,
     train_game_type = train_game_type,
     test_game_type = test_game_type,
+    split_method = split_method,
+    random_seed = random_seed,
     out_model = out_model,
     out_ppi   = out_ppi,
     verbose   = TRUE
