@@ -75,11 +75,12 @@ out_dir <- "output/test_visuals"
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 create_social_media_graphics(
-  res        = mock_res,
-  game_date  = as.character(Sys.Date()),
-  min_pitches = 15,   # lower threshold so relievers qualify in this mock
-  output_dir  = out_dir,
-  top_n       = 5
+  res                  = mock_res,
+  game_date            = as.character(Sys.Date()),
+  min_pitches_starter  = 65,   # mock starters have 65–105 test pitches
+  min_pitches_reliever = 15,   # mock relievers have 15–35 test pitches
+  output_dir           = out_dir,
+  top_n                = 5
 )
 
 cat("\nTest images written to:", normalizePath(out_dir), "\n")
