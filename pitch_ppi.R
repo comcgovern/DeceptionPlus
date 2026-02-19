@@ -1395,46 +1395,98 @@ create_social_media_graphics <- function(res,
   date_display <- format(as.Date(game_date), "%B %d, %Y")
   date_short <- format(as.Date(game_date), "%Y-%m-%d")
 
-  # Custom theme for social media
+  # Custom theme for social media — targets 1200x675 px (16:9, Twitter/Bluesky safe)
   theme_social <- function() {
-    theme_minimal(base_size = 16) +
+    theme_minimal(base_size = 14) +
       theme(
-        plot.title = element_text(face = "bold", size = 22, hjust = 0.5, color = "#1a1a2e"),
-        plot.subtitle = element_text(size = 14, hjust = 0.5, color = "#555555"),
-        plot.caption = element_text(size = 10, color = "#888888", hjust = 1),
+        # Left-aligned title gives a cleaner editorial look
+        plot.title      = element_text(face = "bold", size = 20, hjust = 0,
+                                       color = "#1a1a2e", margin = margin(b = 3)),
+        plot.subtitle   = element_text(size = 12, hjust = 0, color = "#666666",
+                                       margin = margin(b = 10)),
+        plot.caption    = element_text(size = 9, color = "#aaaaaa", hjust = 1,
+                                       margin = margin(t = 8)),
+        # Subtle vertical grid only; no horizontal clutter
+        panel.grid.major.x = element_line(color = "#eeeeee", linewidth = 0.5),
         panel.grid.major.y = element_blank(),
-        panel.grid.minor = element_blank(),
-        axis.text.y = element_text(size = 14, face = "bold", color = "#333333"),
-        axis.text.x = element_text(size = 12, color = "#555555"),
-        axis.title = element_text(size = 14, color = "#555555"),
-        plot.background = element_rect(fill = "white", color = NA),
-        panel.background = element_rect(fill = "white", color = NA),
-        plot.margin = margin(20, 20, 20, 20)
+        panel.grid.minor   = element_blank(),
+        # Pitcher names: bold, easy to read
+        axis.text.y     = element_text(size = 12, face = "bold", color = "#2d2d2d",
+                                       hjust = 1),
+        axis.text.x     = element_text(size = 10, color = "#999999"),
+        axis.title.x    = element_text(size = 10, color = "#888888",
+                                       margin = margin(t = 6)),
+        axis.title.y    = element_blank(),
+        # Clean white canvas; faint warm-gray panel area
+        plot.background  = element_rect(fill = "#ffffff", color = NA),
+        panel.background = element_rect(fill = "#fafafa", color = NA),
+        # Extra right/top margin to avoid clipping score labels and title
+        plot.margin = margin(22, 36, 14, 20)
       )
   }
 
   # Helper function to create a single graphic
+  # Output: 1200x675 px (width=12", height=6.75", dpi=100) — fits Twitter & Bluesky
+  # Twitter recommended: 1200x675 (16:9), max 5 MB
+  # Bluesky recommended: 1200x675 (16:9), max 1 MB
   create_graphic <- function(data, title, subtitle, caption, fill_low, fill_high,
                               filename, reorder_desc = TRUE) {
     if (nrow(data) == 0) return(NULL)
 
+    # Rank-order the rows, then build labelled factor for y-axis
     data <- data %>%
+      arrange(if (reorder_desc) desc(predict_plus) else predict_plus) %>%
       mutate(
-        pitcher_name = if (reorder_desc) reorder(pitcher_name, predict_plus)
-                       else reorder(pitcher_name, -predict_plus),
-        label = sprintf("%.0f", predict_plus)
+        rank       = row_number(),
+        name_label = paste0("#", rank, "  ", pitcher_name),
+        score_label = sprintf("%.0f", predict_plus)
       )
 
-    p <- ggplot(data, aes(x = predict_plus, y = pitcher_name)) +
-      geom_col(aes(fill = predict_plus), width = 0.7, show.legend = FALSE) +
-      geom_text(aes(label = label), hjust = -0.2, size = 5, fontface = "bold", color = "#333333") +
-      geom_vline(xintercept = 100, linetype = "dashed", color = "#cccccc", linewidth = 1) +
+    # Factor levels: lowest bar at bottom, highest at top (ggplot reads bottom-up)
+    data$name_label <- factor(
+      data$name_label,
+      levels = if (reorder_desc) data$name_label[order(data$predict_plus)]
+               else               data$name_label[order(-data$predict_plus)]
+    )
+
+    # Track bar ceiling: a bit above the maximum score so labels have room
+    x_track <- max(data$predict_plus, 110) * 1.20
+    # x-axis left edge: don't start at zero — Predict+ is centred at 100
+    x_left  <- min(data$predict_plus, 90) * 0.94
+    data$x_track <- x_track   # attach as column for geom_col reference
+
+    p <- ggplot(data, aes(y = name_label)) +
+      # Track bars (light gray background behind every bar)
+      geom_col(aes(x = x_track),
+               fill = "#efefef", width = 0.65, show.legend = FALSE) +
+      # Data bars with gradient fill
+      geom_col(aes(x = predict_plus, fill = predict_plus),
+               width = 0.65, show.legend = FALSE) +
+      # League-average reference line
+      geom_vline(xintercept = 100, linetype = "dashed",
+                 color = "#bbbbbb", linewidth = 0.8) +
+      # "AVG" annotation on the reference line
+      annotate("text", x = 100, y = 0.42, label = "AVG",
+               size = 2.8, color = "#bbbbbb", hjust = 0.5) +
+      # Score labels just outside the bar
+      geom_text(aes(x = predict_plus, label = score_label),
+                hjust = -0.28, size = 4.2, fontface = "bold", color = "#333333") +
       scale_fill_gradient(low = fill_low, high = fill_high) +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
-      labs(title = title, subtitle = subtitle, x = "Predict+", y = NULL, caption = caption) +
+      scale_x_continuous(
+        expand = expansion(mult = c(0, 0)),
+        limits = c(x_left, x_track)
+      ) +
+      labs(
+        title    = title,
+        subtitle = subtitle,
+        x        = "Predict+  (100 = league average)",
+        y        = NULL,
+        caption  = caption
+      ) +
       theme_social()
 
-    ggsave(file.path(output_dir, filename), p, width = 10, height = 6, dpi = 300)
+    # 1200x675 px — perfect 16:9 for Twitter/Bluesky
+    ggsave(file.path(output_dir, filename), p, width = 12, height = 6.75, dpi = 100)
     p
   }
 
