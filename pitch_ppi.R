@@ -1364,7 +1364,8 @@ create_visualizations <- function(res, output_dir = "output/visualizations") {
 # ---------------------- Social Media Visualizations ---------------------------
 create_social_media_graphics <- function(res,
                                           game_date,
-                                          min_pitches = 25,
+                                          min_pitches_starter = 65,
+                                          min_pitches_reliever = 15,
                                           output_dir = "output/visualizations",
                                           top_n = 5) {
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -1376,18 +1377,27 @@ create_social_media_graphics <- function(res,
 
   library(ggplot2)
 
-  # Filter pitchers with minimum pitches in test (the day's data) and evaluated status
-  qualified <- res$pitcher_ppi %>%
-    filter(n_pitches_test >= min_pitches)
+  # Apply status filter first (if status column exists)
+  all_pitchers <- res$pitcher_ppi
+  if ("status" %in% names(all_pitchers)) {
+    all_pitchers <- all_pitchers %>% filter(status == "evaluated")
+  }
 
-  # If status column exists, filter to evaluated only
-
-  if ("status" %in% names(qualified)) {
-    qualified <- qualified %>% filter(status == "evaluated")
+  # Apply role-specific pitch thresholds
+  has_roles <- "role" %in% names(all_pitchers)
+  if (has_roles) {
+    qualified <- all_pitchers %>%
+      filter(
+        (role == "starter"  & n_pitches_test >= min_pitches_starter) |
+        (role == "reliever" & n_pitches_test >= min_pitches_reliever)
+      )
+  } else {
+    qualified <- all_pitchers %>%
+      filter(n_pitches_test >= min_pitches_starter)
   }
 
   if (nrow(qualified) == 0) {
-    warning("No pitchers with >= ", min_pitches, " pitches found")
+    warning("No pitchers met the minimum pitch thresholds")
     return(invisible(NULL))
   }
 
@@ -1458,10 +1468,10 @@ create_social_media_graphics <- function(res,
     p <- ggplot(data, aes(y = name_label)) +
       # Track bars (light gray background behind every bar)
       geom_col(aes(x = x_track),
-               fill = "#efefef", width = 0.65, show.legend = FALSE) +
+               fill = "#efefef", width = 0.55, show.legend = FALSE) +
       # Data bars with gradient fill
       geom_col(aes(x = predict_plus, fill = predict_plus),
-               width = 0.65, show.legend = FALSE) +
+               width = 0.55, show.legend = FALSE) +
       # League-average reference line
       geom_vline(xintercept = 100, linetype = "dashed",
                  color = "#bbbbbb", linewidth = 0.8) +
@@ -1492,9 +1502,6 @@ create_social_media_graphics <- function(res,
 
   plots <- list()
 
-  # Check if role column exists for starter/reliever split
-  has_roles <- "role" %in% names(qualified)
-
   if (has_roles) {
     starters <- qualified %>% filter(role == "starter")
     relievers <- qualified %>% filter(role == "reliever")
@@ -1505,8 +1512,8 @@ create_social_media_graphics <- function(res,
       plots$starters_unpredictable <- create_graphic(
         top_starters,
         title = "Least Predictable Starters",
-        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-        caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#4361ee", fill_high = "#7209b7",
         filename = sprintf("social_starters_top%d_unpredictable_%s.png", top_n, date_short),
         reorder_desc = TRUE
@@ -1517,8 +1524,8 @@ create_social_media_graphics <- function(res,
       plots$starters_predictable <- create_graphic(
         bottom_starters,
         title = "Most Predictable Starters",
-        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-        caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e63946", fill_high = "#f4a261",
         filename = sprintf("social_starters_top%d_predictable_%s.png", top_n, date_short),
         reorder_desc = FALSE
@@ -1531,8 +1538,8 @@ create_social_media_graphics <- function(res,
       plots$relievers_unpredictable <- create_graphic(
         top_relievers,
         title = "Least Predictable Relievers",
-        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-        caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
+        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#2a9d8f", fill_high = "#264653",
         filename = sprintf("social_relievers_top%d_unpredictable_%s.png", top_n, date_short),
         reorder_desc = TRUE
@@ -1543,8 +1550,8 @@ create_social_media_graphics <- function(res,
       plots$relievers_predictable <- create_graphic(
         bottom_relievers,
         title = "Most Predictable Relievers",
-        subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-        caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
+        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e76f51", fill_high = "#f4a261",
         filename = sprintf("social_relievers_top%d_predictable_%s.png", top_n, date_short),
         reorder_desc = FALSE
@@ -1559,8 +1566,8 @@ create_social_media_graphics <- function(res,
     plots$top_unpredictable <- create_graphic(
       top_unpred,
       title = "Least Predictable Pitchers",
-      subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-      caption = "Higher = Less Predictable | 100 = League Average | @PredictPlus",
+      subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+      caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#4361ee", fill_high = "#7209b7",
       filename = sprintf("social_top%d_unpredictable_%s.png", top_n, date_short),
       reorder_desc = TRUE
@@ -1570,8 +1577,8 @@ create_social_media_graphics <- function(res,
     plots$top_predictable <- create_graphic(
       top_pred,
       title = "Most Predictable Pitchers",
-      subtitle = paste0(date_display, " | Min ", min_pitches, " pitches"),
-      caption = "Lower = More Predictable | 100 = League Average | @PredictPlus",
+      subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+      caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#e63946", fill_high = "#f4a261",
       filename = sprintf("social_top%d_predictable_%s.png", top_n, date_short),
       reorder_desc = FALSE
