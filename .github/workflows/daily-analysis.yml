@@ -40,11 +40,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Job 1: Lightweight check — are there regular season games today?
+  # Calls the MLB Stats API schedule endpoint before any R setup.
+  # If no games are found the analyze job is skipped entirely.
+  # --------------------------------------------------------------------------
+  check-games:
+    runs-on: ubuntu-latest
+    outputs:
+      has_games: ${{ steps.schedule.outputs.has_games }}
+      date: ${{ steps.date.outputs.date }}
+      level: ${{ steps.date.outputs.level }}
+
+    steps:
+      - name: Determine analysis date
+        id: date
+        run: |
+          if [ -n "${{ github.event.inputs.analysis_date }}" ]; then
+            echo "date=${{ github.event.inputs.analysis_date }}" >> $GITHUB_OUTPUT
+          else
+            # Yesterday in UTC
+            echo "date=$(date -u -d 'yesterday' '+%Y-%m-%d')" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -n "${{ github.event.inputs.level }}" ]; then
+            echo "level=${{ github.event.inputs.level }}" >> $GITHUB_OUTPUT
+          else
+            echo "level=MLB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for regular season games
+        id: schedule
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+
+          echo "Checking MLB schedule for regular season games on ${DATE}..."
+
+          RESPONSE=$(curl -sf \
+            "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${DATE}&gameType=R" \
+            || echo '{"totalGames":0}')
+
+          TOTAL=$(echo "$RESPONSE" | jq '.totalGames // 0')
+
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "has_games=true" >> $GITHUB_OUTPUT
+            echo "Found ${TOTAL} regular season game(s) on ${DATE} — proceeding with analysis."
+          else
+            echo "has_games=false" >> $GITHUB_OUTPUT
+            echo "No regular season games on ${DATE} — skipping analysis."
+          fi
+
+  # --------------------------------------------------------------------------
+  # Job 2: Full analysis — only runs when regular season games exist
+  # --------------------------------------------------------------------------
   analyze:
+    needs: check-games
+    if: needs.check-games.outputs.has_games == 'true'
     runs-on: ubuntu-latest
 
-    # Only run during MLB season (roughly March 20 - October 31)
-    # The job will gracefully handle off-days
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -105,32 +158,16 @@ jobs:
             echo "Daily analysis will use fallback values."
           fi
 
-      - name: Determine analysis date
-        id: date
-        run: |
-          if [ -n "${{ github.event.inputs.analysis_date }}" ]; then
-            echo "date=${{ github.event.inputs.analysis_date }}" >> $GITHUB_OUTPUT
-          else
-            # Yesterday in UTC
-            echo "date=$(date -u -d 'yesterday' '+%Y-%m-%d')" >> $GITHUB_OUTPUT
-          fi
-
-          if [ -n "${{ github.event.inputs.level }}" ]; then
-            echo "level=${{ github.event.inputs.level }}" >> $GITHUB_OUTPUT
-          else
-            echo "level=MLB" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run daily analysis
         id: analysis
         run: |
-          Rscript run_daily.R ${{ steps.date.outputs.date }} --level ${{ steps.date.outputs.level }}
+          Rscript run_daily.R ${{ needs.check-games.outputs.date }} --level ${{ needs.check-games.outputs.level }}
         continue-on-error: true
 
       - name: Check for outputs
         id: check_outputs
         run: |
-          DATE="${{ steps.date.outputs.date }}"
+          DATE="${{ needs.check-games.outputs.date }}"
           YEAR=$(date -d "$DATE" '+%Y')
           MONTH=$(date -d "$DATE" '+%B' | tr '[:upper:]' '[:lower:]')
           DAY=$(date -d "$DATE" '+%d')
@@ -144,7 +181,7 @@ jobs:
             echo "month=$MONTH" >> $GITHUB_OUTPUT
           else
             echo "has_output=false" >> $GITHUB_OUTPUT
-            echo "No games found for $DATE (likely an off-day)"
+            echo "No output CSV found for $DATE"
           fi
 
       - name: Commit and push results
@@ -153,8 +190,8 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
 
-          DATE="${{ steps.date.outputs.date }}"
-          LEVEL="${{ steps.date.outputs.level }}"
+          DATE="${{ needs.check-games.outputs.date }}"
+          LEVEL="${{ needs.check-games.outputs.level }}"
 
           # Add output files
           git add output/ cache/mlbam_name_cache.csv models/ || true
@@ -175,8 +212,8 @@ jobs:
       - name: Create summary
         if: always()
         run: |
-          DATE="${{ steps.date.outputs.date }}"
-          LEVEL="${{ steps.date.outputs.level }}"
+          DATE="${{ needs.check-games.outputs.date }}"
+          LEVEL="${{ needs.check-games.outputs.level }}"
 
           echo "## Daily Predict+ Analysis Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -196,14 +233,14 @@ jobs:
             echo "- CSV: \`${CSV}\`" >> $GITHUB_STEP_SUMMARY
             echo "- Visualizations: \`output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/visualizations/\`" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Status:** No games found (off-day or no data)" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** No output generated" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Upload artifacts
         if: steps.check_outputs.outputs.has_output == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: daily-analysis-${{ steps.date.outputs.date }}
+          name: daily-analysis-${{ needs.check-games.outputs.date }}
           path: |
             output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/
           retention-days: 30
