@@ -58,8 +58,8 @@ TRAIN_GAME_TYPE   <- "R"   # "R" = Regular season, "P" = Playoffs, "S" = Spring
 TEST_GAME_TYPE    <- "R"   # "R" = Regular season, "P" = Playoffs, "W" = World Series
 
 # Level selection (MLB or AAA)
-TRAIN_LEVEL <- "AAA"  # "MLB" = Major League Baseball, "AAA" = Triple-A
-TEST_LEVEL  <- "AAA"  # "MLB" = Major League Baseball, "AAA" = Triple-A
+TRAIN_LEVEL <- "MLB"  # "MLB" = Major League Baseball, "AAA" = Triple-A
+TEST_LEVEL  <- "MLB"  # "MLB" = Major League Baseball, "AAA" = Triple-A
 
 # Split method selection
 # Options:
@@ -99,8 +99,8 @@ BASELINE_KEYS <- c(
 )
 
 # Output paths (will be created if they don't exist)
-OUT_MODEL <- "models/ppi_model_aaa_2025.rds"
-OUT_CSV   <- "output/pitcher_ppi_aaa_2025.csv"
+OUT_MODEL <- "models/ppi_model_mlb_2025.rds"
+OUT_CSV   <- "output/pitcher_ppi_mlb_2025.csv"
 
 # ============================================================================
 # EXECUTION
@@ -139,6 +139,8 @@ res <- train_and_save(
   baseline_type     = BASELINE_TYPE,
   train_game_type   = TRAIN_GAME_TYPE,
   test_game_type    = TEST_GAME_TYPE,
+  train_level       = TRAIN_LEVEL,
+  test_level        = TEST_LEVEL,
   split_method      = SPLIT_METHOD,
   random_seed       = RANDOM_SEED,
   out_model         = OUT_MODEL,

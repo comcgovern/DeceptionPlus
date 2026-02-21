@@ -215,7 +215,14 @@ if (is.null(historical_data) || nrow(historical_data) == 0) {
 
 message("Total historical data: ", nrow(historical_data), " pitches")
 
-# Engineer features on historical data
+# Pre-filter historical data to only pitchers who appeared today before
+# running expensive feature engineering on the full dataset
+message("\nPre-filtering historical data to today's pitchers...")
+pitcher_id_col <- coalesce_pitcher_id(historical_data)
+historical_data <- historical_data[!is.na(pitcher_id_col) & pitcher_id_col %in% today_pitcher_ids, ]
+message("  Filtered to ", nrow(historical_data), " pitches for today's pitchers")
+
+# Engineer features on filtered historical data
 df_history_all <- engineer_features(historical_data)
 df_history_all <- df_history_all %>% dplyr::filter(!is.na(pitcher_id))
 

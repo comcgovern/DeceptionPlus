@@ -55,16 +55,31 @@ jobs:
     steps:
       - name: Determine analysis date
         id: date
+        env:
+          INPUT_DATE: ${{ github.event.inputs.analysis_date }}
+          INPUT_LEVEL: ${{ github.event.inputs.level }}
         run: |
-          if [ -n "${{ github.event.inputs.analysis_date }}" ]; then
-            echo "date=${{ github.event.inputs.analysis_date }}" >> $GITHUB_OUTPUT
+          if [ -n "$INPUT_DATE" ]; then
+            # Validate date format (YYYY-MM-DD only)
+            if echo "$INPUT_DATE" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+              echo "date=$INPUT_DATE" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Invalid date format: $INPUT_DATE (expected YYYY-MM-DD)"
+              exit 1
+            fi
           else
             # Yesterday in UTC
             echo "date=$(date -u -d 'yesterday' '+%Y-%m-%d')" >> $GITHUB_OUTPUT
           fi
 
-          if [ -n "${{ github.event.inputs.level }}" ]; then
-            echo "level=${{ github.event.inputs.level }}" >> $GITHUB_OUTPUT
+          if [ -n "$INPUT_LEVEL" ]; then
+            # Validate level (MLB or AAA only)
+            if [ "$INPUT_LEVEL" = "MLB" ] || [ "$INPUT_LEVEL" = "AAA" ]; then
+              echo "level=$INPUT_LEVEL" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Invalid level: $INPUT_LEVEL (expected MLB or AAA)"
+              exit 1
+            fi
           else
             echo "level=MLB" >> $GITHUB_OUTPUT
           fi
