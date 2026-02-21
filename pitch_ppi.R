@@ -349,11 +349,12 @@ engineer_features <- function(raw) {
     is_risp         = if_else(!is.na(.data$on_2b) | !is.na(.data$on_3b), 1L, 0L),
     # score_diff from the pitcher's perspective:
     # positive = pitcher's team leads, negative = pitcher's team trails
-    # If pitcher is in the top half (visiting pitcher), flip the sign
+    # TOP of inning: visiting team bats, HOME pitcher is on the mound
+    # BOT of inning: home team bats, VISITING pitcher is on the mound
     score_diff      = if_else(
       stringr::str_to_upper(.data$inning_topbot) == "TOP",
-      coalesce(.data$away_score, 0) - coalesce(.data$home_score, 0),  # visiting pitcher
-      coalesce(.data$home_score, 0) - coalesce(.data$away_score, 0)   # home pitcher
+      coalesce(.data$home_score, 0) - coalesce(.data$away_score, 0),  # home pitcher (pitches in top half)
+      coalesce(.data$away_score, 0) - coalesce(.data$home_score, 0)   # visiting pitcher (pitches in bottom half)
     ),
     stand           = coalesce(.data$stand, "R"),
     p_throws        = coalesce(.data$p_throws, "R"),
@@ -426,12 +427,15 @@ compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditiona
   eps <- 1e-12
   
   if (baseline_type == "marginal") {
-    # Marginal baseline: overall pitch type distribution
-    freq <- tr_data %>% count(pitch_class, name = "n")
+    # Marginal baseline: overall pitch type distribution with proper Laplace smoothing
+    # Ensure ALL classes get a pseudo-count (not just observed ones) so probs sum to 1
+    freq <- tibble::tibble(pitch_class = factor(classes, levels = classes)) %>%
+      dplyr::left_join(tr_data %>% dplyr::count(pitch_class, name = "n"), by = "pitch_class") %>%
+      dplyr::mutate(n = dplyr::coalesce(n, 0L))
     probs <- (freq$n + 1) / sum(freq$n + 1)
-    P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
+    P_base <- matrix(rep(probs, each = nrow(te_data)),
+                     nrow = nrow(te_data), ncol = length(classes),
                      dimnames = list(NULL, classes))
-    P_base[, as.character(freq$pitch_class)] <- matrix(rep(probs, each = nrow(te_data)), nrow = nrow(te_data))
     return(P_base)
   }
   
@@ -442,16 +446,27 @@ compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditiona
       warning("No valid baseline keys; falling back to marginal baseline.")
       return(compute_baseline_probs(tr_data, te_data, baseline_type = "marginal", baseline_keys = baseline_keys))
     }
-    
+
     keydf <- tr_data %>%
       mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
       mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    counts <- keydf %>% count(key, pitch_class, name = "n") %>%
-      group_by(key) %>% mutate(prob = (n + 1) / sum(n + 1)) %>% ungroup()
+    raw_counts <- keydf %>% count(key, pitch_class, name = "n")
+    # Complete grid: every (key, class) pair gets a row — proper Laplace smoothing
+    all_keys <- unique(raw_counts$key)
+    complete_grid <- tidyr::expand_grid(
+      key = all_keys,
+      pitch_class = factor(classes, levels = classes)
+    )
+    counts <- complete_grid %>%
+      dplyr::left_join(raw_counts, by = c("key", "pitch_class")) %>%
+      dplyr::mutate(n = dplyr::coalesce(n, 0L)) %>%
+      dplyr::group_by(key) %>%
+      dplyr::mutate(prob = (n + 1) / sum(n + 1)) %>%
+      dplyr::ungroup()
     key_te <- te_data %>%
       mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
       mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    # Vectorized: pivot counts to wide format and join on key
+    # Initialize with uniform for test keys not seen in training
     P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
                      dimnames = list(NULL, classes))
     counts_wide <- counts %>%
@@ -473,38 +488,50 @@ compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditiona
   if (baseline_type == "hybrid") {
     # Hybrid: conditional when possible, marginal fallback
     keys_tr <- prune_baseline_keys(tr_data, baseline_keys)
-    
-    # Marginal distribution
-    freq <- tr_data %>% count(pitch_class, name = "n")
+
+    # Marginal distribution with proper Laplace smoothing over ALL classes
+    freq <- tibble::tibble(pitch_class = factor(classes, levels = classes)) %>%
+      dplyr::left_join(tr_data %>% dplyr::count(pitch_class, name = "n"), by = "pitch_class") %>%
+      dplyr::mutate(n = dplyr::coalesce(n, 0L))
     probs_marginal <- (freq$n + 1) / sum(freq$n + 1)
-    
+
     if (length(keys_tr) == 0) {
       # No valid keys, use marginal
-      P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
+      P_base <- matrix(rep(probs_marginal, each = nrow(te_data)),
+                       nrow = nrow(te_data), ncol = length(classes),
                        dimnames = list(NULL, classes))
-      P_base[, as.character(freq$pitch_class)] <- matrix(rep(probs_marginal, each = nrow(te_data)), nrow = nrow(te_data))
       return(P_base)
     }
-    
-    # Conditional counts
+
+    # Conditional counts with proper Laplace smoothing
     keydf <- tr_data %>%
       mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
       mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    counts <- keydf %>% count(key, pitch_class, name = "n") %>%
-      group_by(key) %>% mutate(prob = (n + 1) / sum(n + 1)) %>% ungroup()
+    raw_counts <- keydf %>% count(key, pitch_class, name = "n")
+    # Complete grid ensures all classes get pseudo-count
+    all_keys <- unique(raw_counts$key)
+    complete_grid <- tidyr::expand_grid(
+      key = all_keys,
+      pitch_class = factor(classes, levels = classes)
+    )
+    counts <- complete_grid %>%
+      dplyr::left_join(raw_counts, by = c("key", "pitch_class")) %>%
+      dplyr::mutate(n = dplyr::coalesce(n, 0L)) %>%
+      dplyr::group_by(key) %>%
+      dplyr::mutate(prob = (n + 1) / sum(n + 1)) %>%
+      dplyr::ungroup()
     key_counts <- keydf %>% count(key, name = "n_key")
-    
+
     key_te <- te_data %>%
       mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
       mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    
-    # Initialize with marginal
-    P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
+
+    # Initialize with marginal (used for keys with insufficient data or unseen keys)
+    P_base <- matrix(rep(probs_marginal, each = nrow(te_data)),
+                     nrow = nrow(te_data), ncol = length(classes),
                      dimnames = list(NULL, classes))
-    P_base[, as.character(freq$pitch_class)] <- matrix(rep(probs_marginal, each = nrow(te_data)), nrow = nrow(te_data))
-    
+
     # Replace with conditional where we have sufficient data (>= 5 observations)
-    # Vectorized: pivot to wide, join, and overwrite qualifying rows
     min_obs <- 5
     qualified_keys <- key_counts %>% filter(n_key >= min_obs) %>% pull(key)
     counts_qualified <- counts %>% filter(key %in% qualified_keys)
@@ -744,7 +771,7 @@ evaluate_per_pitcher <- function(df_history,
 
   if (verbose) message("Evaluating ", length(valid_pitchers), " pitchers with per-pitcher models...")
 
-  eps <- 1e-12
+  eps <- 1e-9
   results <- vector("list", length(valid_pitchers))
 
   for (i in seq_along(valid_pitchers)) {
@@ -775,7 +802,17 @@ evaluate_per_pitcher <- function(df_history,
           te2[[nm]] <- res$v
         }
       }
+      # Align test factor levels to training levels
+      for (nm in feats) {
+        if (is.factor(tr2[[nm]]) && nm %in% names(te2) && is.factor(te2[[nm]])) {
+          te2[[nm]] <- factor(te2[[nm]], levels = levels(tr2[[nm]]))
+        }
+      }
+      # Drop rows with unseen factor levels (now NA)
+      feat_complete <- complete.cases(te2[, intersect(feats, names(te2)), drop = FALSE])
+      te2 <- te2[feat_complete, , drop = FALSE]
     }
+    if (nrow(te2) == 0) next
 
     # Check we have enough pitch classes to fit model
     if (nlevels(droplevels(tr2$pitch_class)) < 2) next
@@ -1021,7 +1058,6 @@ train_ppi <- function(train_start, train_end,
       message("========================================")
     }
 
-    train_level <- if (exists("TRAIN_LEVEL")) TRAIN_LEVEL else "MLB"
     train_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", train_start, train_end, train_game_type, train_level)
     if (file.exists(train_cachefile)) {
       message("✅ Using cached training data: ", train_cachefile)
@@ -1121,14 +1157,33 @@ train_ppi <- function(train_start, train_end,
       te2[[nm]] <- res$v
     }
   }
-  
+
+  # Align test factor levels to training levels (prevents predict errors from unseen levels)
+  for (nm in feats) {
+    if (is.factor(tr2[[nm]]) && is.factor(te2[[nm]])) {
+      te2[[nm]] <- factor(te2[[nm]], levels = levels(tr2[[nm]]))
+    }
+  }
+
+  # Drop test rows with unseen pitch classes or unseen factor levels
+  te2 <- te2 %>% dplyr::filter(!is.na(pitch_class))
+  if (length(feats) > 0) {
+    feat_complete <- complete.cases(te2[, feats, drop = FALSE])
+    if (any(!feat_complete) && verbose) {
+      message("  Dropped ", sum(!feat_complete), " test rows with unseen factor levels")
+    }
+    te2 <- te2[feat_complete, , drop = FALSE]
+  }
+
+  if (nrow(te2) == 0) stop("No valid test rows after aligning factor levels with training data.")
+
   # ========== STEP 5: Model predictions and surprise ==========
   if (verbose) message("\n🎯 Evaluating test pitches...")
-  
+
+  eps <- 1e-9
   P <- safe_predict_probs(mod, te2, classes)
 
   idx_true <- match(as.character(te2$pitch_class), classes)
-  eps      <- 1e-12
   p_true   <- P[cbind(seq_len(nrow(te2)), idx_true)]
   surp_model <- -log(pmax(p_true, eps))
   
@@ -1229,7 +1284,7 @@ train_ppi <- function(train_start, train_end,
   # but scores are anchored to a stable reference population.
   pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      predict_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-12))
+      predict_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-9))
     ) %>%
     select(
       pitcher_id, pitcher_name, total_pitches, n_pitches_test,

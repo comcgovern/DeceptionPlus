@@ -57,7 +57,6 @@ compute_per_pitcher_unpredictability <- function(df_train,
                                                    min_train_pitches = 50,
                                                    min_test_pitches = 10,
                                                    feature_names = FEATURE_NAMES,
-                                                   baseline_keys = BASELINE_KEYS,
                                                    verbose = TRUE) {
 
   result <- evaluate_per_pitcher(
@@ -154,7 +153,6 @@ for (run in seq_len(N_RUNS)) {
    min_train_pitches = MIN_PITCHES / 2,  # Half goes to train
    min_test_pitches = MIN_PITCHES / 2,   # Half goes to test
    feature_names = FEATURE_NAMES,
-   baseline_keys = BASELINE_KEYS,
    verbose = FALSE
  )
 
