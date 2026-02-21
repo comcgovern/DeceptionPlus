@@ -270,7 +270,7 @@ per_pitcher_results <- per_pitcher_results %>%
     ppi = 1 - (mean_surp_model / pmax(mean_surp_base, 1e-9)),
     ppi = pmin(pmax(ppi, -1), 1),
     predict_plus = 100 + 10 * ((unpredictability_ratio - baseline_params$mu) /
-                                pmax(baseline_params$sd, 1e-12))
+                                pmax(baseline_params$sd, 1e-9))
   )
 
 # Identify starter/reliever roles from test data
