@@ -50,19 +50,8 @@ BASELINE_KEYS <- c("balls", "strikes", "stand", "two_strikes")
 # PER-PITCHER MODEL FUNCTION
 # ============================================================================
 
-#' Train per-pitcher models and compute unpredictability ratios
-#'
-#' For each pitcher, trains a multinomial model on their training pitches
-#' and evaluates surprise on their test pitches.
-#'
-#' @param df_train Training data (all pitchers)
-#' @param df_test Test data (all pitchers)
-#' @param min_train_pitches Minimum training pitches per pitcher
-#' @param min_test_pitches Minimum test pitches per pitcher
-#' @param feature_names Features to use in model
-#' @param baseline_keys Features for baseline model
-#' @param verbose Print progress
-#' @return Data frame with per-pitcher unpredictability ratios
+# Uses evaluate_per_pitcher() from pitch_ppi.R (shared implementation).
+# Thin wrapper to match the interface expected by the baseline computation loop.
 compute_per_pitcher_unpredictability <- function(df_train,
                                                    df_test,
                                                    min_train_pitches = 50,
@@ -71,120 +60,22 @@ compute_per_pitcher_unpredictability <- function(df_train,
                                                    baseline_keys = BASELINE_KEYS,
                                                    verbose = TRUE) {
 
- # Prepare factor columns
- df_train <- df_train %>%
-   mutate(
-     pitch_class = factor(pitch_class),
-     stand = na_safe_factor(stand),
-     p_throws = na_safe_factor(p_throws),
-     last_pitch_type = na_safe_factor(last_pitch_type)
-   )
+  result <- evaluate_per_pitcher(
+    df_history = df_train,
+    df_test = df_test,
+    min_train_pitches = min_train_pitches,
+    min_test_pitches = min_test_pitches,
+    feature_names = feature_names,
+    verbose = verbose
+  )
 
- df_test <- df_test %>%
-   mutate(
-     pitch_class = factor(pitch_class),
-     stand = na_safe_factor(stand),
-     p_throws = na_safe_factor(p_throws),
-     last_pitch_type = na_safe_factor(last_pitch_type)
-   )
-
- # Get pitchers with enough data in both train and test
- train_counts <- df_train %>%
-   group_by(pitcher_id) %>%
-   summarise(n_train = n(), .groups = "drop") %>%
-   filter(n_train >= min_train_pitches)
-
- test_counts <- df_test %>%
-   group_by(pitcher_id) %>%
-   summarise(n_test = n(), .groups = "drop") %>%
-   filter(n_test >= min_test_pitches)
-
- valid_pitchers <- intersect(train_counts$pitcher_id, test_counts$pitcher_id)
-
- if (length(valid_pitchers) == 0) {
-   warning("No pitchers with sufficient data in both train and test")
-   return(tibble())
- }
-
- if (verbose) message("  Processing ", length(valid_pitchers), " pitchers...")
-
- eps <- 1e-12
- results <- vector("list", length(valid_pitchers))
-
- for (i in seq_along(valid_pitchers)) {
-   pid <- valid_pitchers[i]
-
-   # Get this pitcher's data
-   ptr_train <- df_train %>% filter(pitcher_id == pid)
-   ptr_test <- df_test %>% filter(pitcher_id == pid)
-
-   # Prepare features for this pitcher
-   pf_tr <- prepare_features(ptr_train, feature_names)
-   tr2 <- pf_tr$data
-   feats <- pf_tr$features
-
-   # Align test data with training levels
-   ptr_test <- ptr_test %>%
-     mutate(pitch_class = factor(pitch_class, levels = levels(tr2$pitch_class)))
-
-   # Drop test rows with unseen pitch classes
-   ptr_test <- ptr_test %>% filter(!is.na(pitch_class))
-   if (nrow(ptr_test) == 0) next
-
-   te2 <- ptr_test
-   if (length(feats) > 0) {
-     for (nm in feats) {
-       if (nm %in% names(te2)) {
-         res <- clean_one_feature(te2[[nm]])
-         te2[[nm]] <- res$v
-       }
-     }
-   }
-
-   # Check we have enough pitch classes
-   if (nlevels(droplevels(tr2$pitch_class)) < 2) next
-
-   # Fit per-pitcher model
-   form <- if (length(feats) == 0) as.formula("pitch_class ~ 1")
-           else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
-
-   mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200), silent = TRUE)
-   if (inherits(mod, "try-error")) next
-
-   classes <- levels(tr2$pitch_class)
-
-   # Model predictions on test data
-   P <- as.matrix(predict(mod, newdata = te2, type = "probs"))
-   if (!is.matrix(P)) {
-     P <- matrix(P, nrow = nrow(te2), ncol = length(classes), dimnames = list(NULL, classes))
-   }
-
-   idx_true <- match(as.character(te2$pitch_class), classes)
-   # Skip if any NA matches (shouldn't happen after filtering)
-   if (any(is.na(idx_true))) next
-
-   p_true <- P[cbind(seq_len(nrow(te2)), idx_true)]
-   surp_model <- -log(pmax(p_true, eps))
-
-   # Baseline: pitcher's own marginal pitch frequencies from training
-   pitch_freqs <- table(tr2$pitch_class)
-   pitch_probs <- (pitch_freqs + 1) / sum(pitch_freqs + 1)  # Add-1 smoothing
-
-   p_base <- pitch_probs[as.character(te2$pitch_class)]
-   surp_base <- -log(pmax(as.numeric(p_base), eps))
-
-   # Aggregate for this pitcher
-   results[[i]] <- tibble(
-     pitcher_id = pid,
-     n_train = nrow(ptr_train),
-     n_test = nrow(ptr_test),
-     mean_surp_model = mean(surp_model),
-     mean_surp_base = mean(surp_base),
-     unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps)
-   )
- }
-
- bind_rows(results)
+  # Rename n_history -> n_train to match the baseline computation expectation
+  if (nrow(result$results) > 0) {
+    result$results %>%
+      dplyr::rename(n_train = n_history)
+  } else {
+    tibble()
+  }
 }
 
 # ============================================================================

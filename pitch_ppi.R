@@ -17,6 +17,26 @@ suppressPackageStartupMessages({
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 safe_div <- function(a, b) ifelse(b > 0, a / b, 0)
 
+# Safe wrapper for multinom predict with 2-class edge case handling.
+# When nnet::multinom has exactly 2 classes, predict(type="probs") returns
+# a vector of P(class2) only. This converts it to a proper probability matrix.
+safe_predict_probs <- function(mod, newdata, classes) {
+  P <- predict(mod, newdata = newdata, type = "probs")
+  if (is.matrix(P) && ncol(P) == length(classes)) return(P)
+  # 2-class case: P is a vector of P(second class)
+  if (length(classes) == 2 && is.numeric(P) && !is.matrix(P)) {
+    P <- cbind(1 - P, P)
+    colnames(P) <- classes
+    return(P)
+  }
+  # General fallback: force to matrix
+  P <- as.matrix(P)
+  if (ncol(P) != length(classes)) {
+    P <- matrix(P, nrow = nrow(newdata), ncol = length(classes), dimnames = list(NULL, classes))
+  }
+  P
+}
+
 # ---------------------- Directory Setup --------------------------------------
 ensure_directories <- function() {
   dirs <- c("cache", "models", "output", "output/visualizations")
@@ -222,18 +242,26 @@ base_state_row <- function(on1, on2, on3) {
   b3 * 4L + b2 * 2L + b1
 }
 
-is_contact <- function(desc) { if (is.na(desc)) FALSE else grepl("foul|hit_into_play|foul_tip", tolower(desc)) }
-is_swing   <- function(desc) { if (is.na(desc)) FALSE else grepl("swinging", tolower(desc)) || is_contact(desc) }
-in_strike_zone <- function(zone) { z <- suppressWarnings(as.integer(zone)); !is.na(z) && z >= 1 && z <= 9 }
+# Vectorized versions for use on whole columns
+is_contact_vec <- function(desc) {
+  grepl("foul|hit_into_play|foul_tip", tolower(desc)) & !is.na(desc)
+}
+is_swing_vec <- function(desc) {
+  (grepl("swinging", tolower(desc)) | is_contact_vec(desc)) & !is.na(desc)
+}
+in_strike_zone_vec <- function(zone) {
+  z <- suppressWarnings(as.integer(zone))
+  !is.na(z) & z >= 1L & z <= 9L
+}
 
 compute_batter_metrics <- function(df) {
   if (!"zone" %in% names(df)) df$zone <- NA
   if (!"description" %in% names(df)) df$description <- NA_character_
   sub <- df %>% transmute(
     batter   = .data$batter,
-    in_zone  = purrr::map_lgl(.data$zone, in_strike_zone),
-    swing    = purrr::map_lgl(.data$description, is_swing),
-    contact  = purrr::map_lgl(.data$description, is_contact),
+    in_zone  = in_strike_zone_vec(.data$zone),
+    swing    = is_swing_vec(.data$description),
+    contact  = is_contact_vec(.data$description),
     out_zone = !in_zone
   )
   sub %>% group_by(batter) %>% summarise(
@@ -319,7 +347,14 @@ engineer_features <- function(raw) {
     ahead_in_count  = if_else(.data$balls > .data$strikes, 1L, 0L),
     base_state      = base_state_row(.data$on_1b, .data$on_2b, .data$on_3b),
     is_risp         = if_else(!is.na(.data$on_2b) | !is.na(.data$on_3b), 1L, 0L),
-    score_diff      = coalesce(.data$home_score, 0) - coalesce(.data$away_score, 0),
+    # score_diff from the pitcher's perspective:
+    # positive = pitcher's team leads, negative = pitcher's team trails
+    # If pitcher is in the top half (visiting pitcher), flip the sign
+    score_diff      = if_else(
+      stringr::str_to_upper(.data$inning_topbot) == "TOP",
+      coalesce(.data$away_score, 0) - coalesce(.data$home_score, 0),  # visiting pitcher
+      coalesce(.data$home_score, 0) - coalesce(.data$away_score, 0)   # home pitcher
+    ),
     stand           = coalesce(.data$stand, "R"),
     p_throws        = coalesce(.data$p_throws, "R"),
     game_date       = as_datetime(.data$game_date),
@@ -337,7 +372,7 @@ engineer_features <- function(raw) {
   } else {
     # Fallback if variable not available (shouldn't happen with modern Statcast data)
     df$times_through_order <- 1L
-    if (verbose) warning("n_thruorder_pitcher not found in data; setting times_through_order to 1")
+    warning("n_thruorder_pitcher not found in data; setting times_through_order to 1")
   }
   
   df <- add_last_pitch(df)
@@ -416,11 +451,21 @@ compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditiona
     key_te <- te_data %>%
       mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
       mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
+    # Vectorized: pivot counts to wide format and join on key
     P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
                      dimnames = list(NULL, classes))
-    for (i in seq_len(nrow(key_te))) {
-      sub <- counts %>% dplyr::filter(key == key_te$key[i])
-      if (nrow(sub) > 0) P_base[i, as.character(sub$pitch_class)] <- sub$prob
+    counts_wide <- counts %>%
+      select(key, pitch_class, prob) %>%
+      tidyr::pivot_wider(names_from = pitch_class, values_from = prob, values_fill = NA)
+    matched <- dplyr::left_join(
+      tibble::tibble(key = key_te$key, .row = seq_len(nrow(key_te))),
+      counts_wide, by = "key"
+    )
+    for (cls in classes) {
+      if (cls %in% names(matched) && any(!is.na(matched[[cls]]))) {
+        idx <- which(!is.na(matched[[cls]]))
+        P_base[matched$.row[idx], cls] <- matched[[cls]][idx]
+      }
     }
     return(P_base)
   }
@@ -459,14 +504,22 @@ compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditiona
     P_base[, as.character(freq$pitch_class)] <- matrix(rep(probs_marginal, each = nrow(te_data)), nrow = nrow(te_data))
     
     # Replace with conditional where we have sufficient data (>= 5 observations)
+    # Vectorized: pivot to wide, join, and overwrite qualifying rows
     min_obs <- 5
-    for (i in seq_len(nrow(key_te))) {
-      k <- key_te$key[i]
-      n_obs <- key_counts %>% filter(key == k) %>% pull(n_key)
-      if (length(n_obs) > 0 && n_obs[1] >= min_obs) {
-        sub <- counts %>% filter(key == k)
-        if (nrow(sub) > 0) {
-          P_base[i, as.character(sub$pitch_class)] <- sub$prob
+    qualified_keys <- key_counts %>% filter(n_key >= min_obs) %>% pull(key)
+    counts_qualified <- counts %>% filter(key %in% qualified_keys)
+    if (nrow(counts_qualified) > 0) {
+      counts_wide <- counts_qualified %>%
+        select(key, pitch_class, prob) %>%
+        tidyr::pivot_wider(names_from = pitch_class, values_from = prob, values_fill = NA)
+      matched <- dplyr::left_join(
+        tibble::tibble(key = key_te$key, .row = seq_len(nrow(key_te))),
+        counts_wide, by = "key"
+      )
+      for (cls in classes) {
+        if (cls %in% names(matched) && any(!is.na(matched[[cls]]))) {
+          idx <- which(!is.na(matched[[cls]]))
+          P_base[matched$.row[idx], cls] <- matched[[cls]][idx]
         }
       }
     }
@@ -737,10 +790,7 @@ evaluate_per_pitcher <- function(df_history,
     classes <- levels(tr2$pitch_class)
 
     # Model predictions on test data
-    P <- as.matrix(predict(mod, newdata = te2, type = "probs"))
-    if (!is.matrix(P)) {
-      P <- matrix(P, nrow = nrow(te2), ncol = length(classes), dimnames = list(NULL, classes))
-    }
+    P <- safe_predict_probs(mod, te2, classes)
 
     idx_true <- match(as.character(te2$pitch_class), classes)
     if (any(is.na(idx_true))) next
@@ -880,6 +930,8 @@ train_ppi <- function(train_start, train_end,
                       baseline_type = "conditional",
                       train_game_type = "R",
                       test_game_type = "R",
+                      train_level = "MLB",
+                      test_level = "MLB",
                       split_method = "temporal",
                       random_seed = NULL,
                       verbose = TRUE) {
@@ -920,7 +972,6 @@ train_ppi <- function(train_start, train_end,
       message("========================================")
     }
 
-    train_level <- if (exists("TRAIN_LEVEL")) TRAIN_LEVEL else "MLB"
     cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", train_start, train_end, train_game_type, train_level)
     if (file.exists(cachefile)) {
       message("✅ Using cached data: ", cachefile)
@@ -997,7 +1048,6 @@ train_ppi <- function(train_start, train_end,
       message("========================================")
     }
 
-    test_level <- if (exists("TEST_LEVEL")) TEST_LEVEL else "MLB"
     test_cachefile <- sprintf("cache/savant_raw_%s_%s_%s_%s.Rds", test_start, test_end, test_game_type, test_level)
     if (file.exists(test_cachefile)) {
       message("✅ Using cached test data: ", test_cachefile)
@@ -1075,11 +1125,8 @@ train_ppi <- function(train_start, train_end,
   # ========== STEP 5: Model predictions and surprise ==========
   if (verbose) message("\n🎯 Evaluating test pitches...")
   
-  P <- as.matrix(predict(mod, newdata = te2, type = "probs"))
-  if (!is.matrix(P)) {
-    P <- matrix(P, nrow = nrow(te2), ncol = length(classes), dimnames = list(NULL, classes))
-  }
-  
+  P <- safe_predict_probs(mod, te2, classes)
+
   idx_true <- match(as.character(te2$pitch_class), classes)
   eps      <- 1e-12
   p_true   <- P[cbind(seq_len(nrow(te2)), idx_true)]
@@ -1100,10 +1147,7 @@ train_ppi <- function(train_start, train_end,
   if (verbose) message("📊 Computing training baseline for standardization...")
 
   # In-sample predictions on training data
-  P_train <- as.matrix(predict(mod, newdata = tr2, type = "probs"))
-  if (!is.matrix(P_train)) {
-    P_train <- matrix(P_train, nrow = nrow(tr2), ncol = length(classes), dimnames = list(NULL, classes))
-  }
+  P_train <- safe_predict_probs(mod, tr2, classes)
 
   idx_true_train <- match(as.character(tr2$pitch_class), classes)
   p_true_train <- P_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
@@ -1233,6 +1277,8 @@ train_and_save <- function(train_start, train_end,
                            baseline_type = "conditional",
                            train_game_type = "R",
                            test_game_type = "R",
+                           train_level = "MLB",
+                           test_level = "MLB",
                            split_method = "temporal",
                            random_seed = NULL,
                            out_model = "models/ppi_model.rds",
@@ -1248,6 +1294,8 @@ train_and_save <- function(train_start, train_end,
                    baseline_type = baseline_type,
                    train_game_type = train_game_type,
                    test_game_type = test_game_type,
+                   train_level = train_level,
+                   test_level = test_level,
                    split_method = split_method,
                    random_seed = random_seed,
                    verbose = verbose)
@@ -1613,6 +1661,8 @@ if (length(args) > 0) {
   test_game_type <- get_arg("--test_game_type", "R")
   features  <- parse_csv_list(feat_str); base_keys <- parse_csv_list(base_str)
   
+  train_level <- get_arg("--train_level", "MLB")
+  test_level <- get_arg("--test_level", "MLB")
   split_method <- get_arg("--split_method", "temporal")
   random_seed_str <- get_arg("--random_seed", NA)
   random_seed <- if (is.na(random_seed_str)) NULL else suppressWarnings(as.integer(random_seed_str))
@@ -1647,6 +1697,8 @@ if (length(args) > 0) {
     baseline_type = baseline_type,
     train_game_type = train_game_type,
     test_game_type = test_game_type,
+    train_level = train_level,
+    test_level = test_level,
     split_method = split_method,
     random_seed = random_seed,
     out_model = out_model,
