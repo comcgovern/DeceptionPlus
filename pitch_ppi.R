@@ -1521,6 +1521,22 @@ create_social_media_graphics <- function(res,
 
   library(ggplot2)
 
+  # Load IBM Plex Sans from Google Fonts.
+  # Per Datawrapper typography guidelines: sans-serif with tabular lining figures
+  # keeps numbers the same height and equally spaced — essential for chart labels.
+  chart_font <- ""  # empty string = ggplot2 system default
+  if (requireNamespace("sysfonts",  quietly = TRUE) &&
+      requireNamespace("showtext", quietly = TRUE)) {
+    tryCatch({
+      sysfonts::font_add_google("IBM Plex Sans", "ibm_plex_sans")
+      showtext::showtext_auto()
+      showtext::showtext_opts(dpi = 100)  # must match ggsave dpi
+      chart_font <- "ibm_plex_sans"
+    }, error = function(e) {
+      message("Could not load IBM Plex Sans; falling back to system font. ", conditionMessage(e))
+    })
+  }
+
   # Apply status filter first (if status column exists)
   all_pitchers <- res$pitcher_ppi
   if ("status" %in% names(all_pitchers)) {
@@ -1550,26 +1566,37 @@ create_social_media_graphics <- function(res,
   date_short <- format(as.Date(game_date), "%Y-%m-%d")
 
   # Custom theme for social media — targets 1200x675 px (16:9, Twitter/Bluesky safe)
+  # Typography follows Datawrapper guidelines:
+  #   • IBM Plex Sans — clean sans-serif with tabular lining figures
+  #   • Near-black (#1a1a2e) for primary text; mid-gray for secondary
+  #   • Bold only for the title and pitcher names (two clear hierarchy levels)
+  #   • Left-aligned text throughout; sentence case (no uppercase labels)
   theme_social <- function() {
-    theme_minimal(base_size = 14) +
+    theme_minimal(base_size = 14, base_family = chart_font) +
       theme(
-        # Left-aligned title gives a cleaner editorial look
+        # Title: bold, large — the only heavy weight in the layout
         plot.title      = element_text(face = "bold", size = 22, hjust = 0,
-                                       color = "#1a1a2e", margin = margin(b = 4)),
+                                       color = "#1a1a2e", margin = margin(b = 4),
+                                       family = chart_font),
+        # Subtitle: regular weight, clearly smaller — second hierarchy level
         plot.subtitle   = element_text(size = 12, hjust = 0, color = "#777777",
-                                       margin = margin(b = 14)),
+                                       face = "plain", margin = margin(b = 14),
+                                       family = chart_font),
         plot.caption    = element_text(size = 9, color = "#aaaaaa", hjust = 1,
-                                       margin = margin(t = 10)),
+                                       face = "plain", margin = margin(t = 10),
+                                       family = chart_font),
         # Subtle vertical grid only; no horizontal clutter
         panel.grid.major.x = element_line(color = "#e8e8e8", linewidth = 0.5),
         panel.grid.major.y = element_blank(),
         panel.grid.minor   = element_blank(),
-        # Pitcher names: bold, easy to read
+        # Pitcher names: bold for identity (the one other place bold is warranted)
         axis.text.y     = element_text(size = 13, face = "bold", color = "#1a1a2e",
-                                       hjust = 1),
-        axis.text.x     = element_text(size = 10, color = "#999999"),
-        axis.title.x    = element_text(size = 10, color = "#888888",
-                                       margin = margin(t = 8)),
+                                       hjust = 1, family = chart_font),
+        # Axis tick labels: regular weight, secondary gray
+        axis.text.x     = element_text(size = 10, color = "#999999", face = "plain",
+                                       family = chart_font),
+        axis.title.x    = element_text(size = 10, color = "#888888", face = "plain",
+                                       margin = margin(t = 8), family = chart_font),
         axis.title.y    = element_blank(),
         # Clean white canvas; light panel
         plot.background  = element_rect(fill = "#ffffff", color = NA),
@@ -1631,9 +1658,10 @@ create_social_media_graphics <- function(res,
       # "AVG" annotation on the reference line
       annotate("text", x = avg_shifted, y = 0.42, label = "AVG",
                size = 2.8, color = "#aaaaaa", hjust = 0.5) +
-      # Score labels just outside the bar end
+      # Score labels just outside the bar end — bold for emphasis, IBM Plex tabular nums
       geom_text(aes(x = bar_shifted, label = score_label),
-                hjust = -0.32, size = 4.5, fontface = "bold", color = "#333333") +
+                hjust = -0.32, size = 4.5, fontface = "bold", color = "#333333",
+                family = chart_font) +
       scale_fill_gradient(low = fill_low, high = fill_high) +
       scale_x_continuous(
         expand = expansion(mult = c(0, 0.01)),
