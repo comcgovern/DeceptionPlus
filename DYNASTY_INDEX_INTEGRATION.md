@@ -268,7 +268,7 @@ PPI lives on the range [-1, 1] and is clamped to that range. It is an intuitive 
 
 ### Step 1: Data Acquisition
 
-Source: MLB Statcast via the [sabRmetrics](https://github.com/tbuffington7/sabRmetrics) R package (MLB) and direct Baseball Savant API (AAA).
+Source: MLB Statcast via the [sabRmetrics](https://github.com/saberpowers/sabRmetrics) R package (MLB) and direct Baseball Savant API (AAA).
 
 Data is cached locally as `.Rds` files named:
 ```

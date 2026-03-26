@@ -43,7 +43,7 @@ install.packages(c("dplyr", "tidyr", "purrr", "stringr", "lubridate",
                    "nnet", "readr", "tibble", "forcats", "jsonlite", "httr"))
 
 # For data access
-install.packages("sabRmetrics")
+devtools::install_github("saberpowers/sabRmetrics")
 ```
 
 ### Basic Usage
@@ -177,7 +177,7 @@ Rscript pitch_ppi.R \
 
 ## Data Sources
 
-- **MLB Statcast data**: Via [sabRmetrics](https://github.com/tbuffington7/sabRmetrics) package
+- **MLB Statcast data**: Via [sabRmetrics](https://github.com/saberpowers/sabRmetrics) package
 - **AAA Statcast data**: Direct Baseball Savant API integration using the sabRmetrics source code
 - **Pitcher names**: MLB Stats API with local caching
 
