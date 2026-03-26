@@ -4,7 +4,7 @@ authors:
 - family-names: "McGovern"
   given-names: "Conor"
   orcid: "https://orcid.org/0009-0002-1624-2904"
-title: "Predict+: Measuring MLB and AAA pitcher unpredictability in R through machine learning analysis of pitch selection"
+title: "Deception+: Measuring MLB and AAA pitcher unpredictability in R through machine learning analysis of pitch selection"
 version: 1.0.0
 doi: 10.5281/zenodo.17553074
 date-released: 2025-11-07

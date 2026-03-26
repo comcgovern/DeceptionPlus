@@ -1,7 +1,7 @@
 # ============================================================================
-# run_daily.R — Daily Predict+ Analysis Using Per-Pitcher Models
+# run_daily.R — Daily Deception+ Analysis Using Per-Pitcher Models
 # ----------------------------------------------------------------------------
-# Runs daily Predict+ analysis for the previous day's MLB games using
+# Runs daily Deception+ analysis for the previous day's MLB games using
 # per-pitcher models (each pitcher evaluated against their own patterns).
 #
 # Approach:
@@ -92,7 +92,7 @@ OUT_MODEL <- file.path("models", sprintf("daily_%s_%s.rds", LEVEL, TARGET_DATE))
 
 cat("\n")
 cat("============================================================\n")
-cat("  Predict+ Daily Analysis (Per-Pitcher Models)\n")
+cat("  Deception+ Daily Analysis (Per-Pitcher Models)\n")
 cat("============================================================\n")
 cat("Target Date:       ", as.character(TARGET_DATE), "\n")
 cat("Level:             ", LEVEL, "\n")
@@ -314,14 +314,14 @@ if (nrow(per_pitcher_results) == 0) {
 # STANDARDIZE TO PREDICT+
 # ============================================================================
 
-message("\nStandardizing to Predict+ scale...")
+message("\nStandardizing to Deception+ scale...")
 
-# Calculate Predict+ using fixed baseline parameters
+# Calculate Deception+ using fixed baseline parameters
 per_pitcher_results <- per_pitcher_results %>%
   dplyr::mutate(
     ppi = 1 - (mean_surp_model / pmax(mean_surp_base, 1e-9)),
     ppi = pmin(pmax(ppi, -1), 1),
-    predict_plus = 100 + 10 * ((unpredictability_ratio - baseline_params$mu) /
+    deception_plus = 100 + 10 * ((unpredictability_ratio - baseline_params$mu) /
                                 pmax(baseline_params$sd, 1e-9))
   )
 
@@ -359,9 +359,9 @@ evaluated_ppi <- per_pitcher_results %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, predict_plus, status
+    unpredictability_ratio, deception_plus, status
   ) %>%
-  dplyr::arrange(dplyr::desc(predict_plus))
+  dplyr::arrange(dplyr::desc(deception_plus))
 
 # Create excluded pitchers output (debuts, insufficient history)
 excluded_ppi <- excluded_pitchers %>%
@@ -377,18 +377,18 @@ excluded_ppi <- excluded_pitchers %>%
     mean_surp_base = NA_real_,
     ppi = NA_real_,
     unpredictability_ratio = NA_real_,
-    predict_plus = NA_real_,
+    deception_plus = NA_real_,
     role = dplyr::coalesce(role, "unknown")
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, predict_plus, status
+    unpredictability_ratio, deception_plus, status
   )
 
 # Combine evaluated and excluded pitchers
 pitcher_ppi <- dplyr::bind_rows(evaluated_ppi, excluded_ppi) %>%
-  dplyr::arrange(dplyr::desc(predict_plus), status)
+  dplyr::arrange(dplyr::desc(deception_plus), status)
 
 # ============================================================================
 # SAVE RESULTS
@@ -482,18 +482,18 @@ print_rankings <- function(data, title_top, title_bottom, n = 5) {
 
   cat(title_top, ":\n", sep = "")
   top_n <- data %>%
-    dplyr::arrange(dplyr::desc(predict_plus)) %>%
+    dplyr::arrange(dplyr::desc(deception_plus)) %>%
     head(n) %>%
     dplyr::mutate(rank = dplyr::row_number()) %>%
-    dplyr::select(rank, pitcher_name, n_pitches_test, predict_plus)
+    dplyr::select(rank, pitcher_name, n_pitches_test, deception_plus)
   print(as.data.frame(top_n), row.names = FALSE)
 
   cat("\n", title_bottom, ":\n", sep = "")
   bottom_n <- data %>%
-    dplyr::arrange(predict_plus) %>%
+    dplyr::arrange(deception_plus) %>%
     head(n) %>%
     dplyr::mutate(rank = dplyr::row_number()) %>%
-    dplyr::select(rank, pitcher_name, n_pitches_test, predict_plus)
+    dplyr::select(rank, pitcher_name, n_pitches_test, deception_plus)
   print(as.data.frame(bottom_n), row.names = FALSE)
 }
 
@@ -563,7 +563,7 @@ if (LEVEL == "MLB") {
       orioles_ppi <- pitcher_ppi %>%
         dplyr::filter(.data$pitcher_id %in% orioles_pitcher_ids,
                       .data$n_pitches_test >= 10) %>%
-        dplyr::arrange(dplyr::desc(.data$predict_plus))
+        dplyr::arrange(dplyr::desc(.data$deception_plus))
     }
   }
 
@@ -575,7 +575,7 @@ if (LEVEL == "MLB") {
     orioles_display <- orioles_ppi %>%
       dplyr::select(
         .data$pitcher_name, .data$role, .data$n_pitches_test,
-        .data$predict_plus, .data$status
+        .data$deception_plus, .data$status
       )
     print(as.data.frame(orioles_display), row.names = FALSE)
 

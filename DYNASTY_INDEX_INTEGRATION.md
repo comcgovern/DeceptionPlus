@@ -1,12 +1,12 @@
-# Predict+ — Mechanics Reference for Dynasty Index Integration
+# Deception+ — Mechanics Reference for Dynasty Index Integration
 
-This document explains every aspect of how Predict+ works: what it measures, how it is calculated, what the output numbers mean, and how to correctly surface the metric to Dynasty Index users.
+This document explains every aspect of how Deception+ works: what it measures, how it is calculated, what the output numbers mean, and how to correctly surface the metric to Dynasty Index users.
 
 ---
 
 ## Table of Contents
 
-1. [What Predict+ Measures](#1-what-predict-measures)
+1. [What Deception+ Measures](#1-what-predict-measures)
 2. [The Score Scale](#2-the-score-scale)
 3. [Core Concept: Surprise](#3-core-concept-surprise)
 4. [The Two-Model Architecture](#4-the-two-model-architecture)
@@ -26,9 +26,9 @@ This document explains every aspect of how Predict+ works: what it measures, how
 
 ---
 
-## 1. What Predict+ Measures
+## 1. What Deception+ Measures
 
-Predict+ quantifies **how difficult a pitcher's pitch selection is to predict** given full knowledge of game context, sequencing history, and batter tendencies.
+Deception+ quantifies **how difficult a pitcher's pitch selection is to predict** given full knowledge of game context, sequencing history, and batter tendencies.
 
 It does **not** measure:
 - Pitch quality (velocity, movement, spin)
@@ -45,7 +45,7 @@ A pitcher can have a two-pitch arsenal and still score extremely high if they us
 
 ## 2. The Score Scale
 
-Predict+ is standardized to the same scale as ERA+ and wRC+:
+Deception+ is standardized to the same scale as ERA+ and wRC+:
 
 | Score | Interpretation |
 |-------|---------------|
@@ -66,7 +66,7 @@ The score is always relative to the training population and period. A score of 1
 
 ## 3. Core Concept: Surprise
 
-The mathematical engine behind Predict+ is **surprise** (also called negative log-likelihood):
+The mathematical engine behind Deception+ is **surprise** (also called negative log-likelihood):
 
 ```
 Surprise(pitch | model) = -log( P_model(actual pitch) )
@@ -91,7 +91,7 @@ We use natural logarithm (nats) rather than log base 2 (bits) for numerical stab
 
 ## 4. The Two-Model Architecture
 
-Predict+ does not simply measure raw surprise from one model. It compares two models to isolate **genuine** unpredictability from superficial effects like pitch mix diversity or count-driven tendencies.
+Deception+ does not simply measure raw surprise from one model. It compares two models to isolate **genuine** unpredictability from superficial effects like pitch mix diversity or count-driven tendencies.
 
 ### Full Model (Complex Predictor)
 
@@ -223,13 +223,13 @@ A ratio of exactly 1.0 is rare in practice. Most pitchers fall in the 0.90–1.1
 
 ## 7. Standardization Formula
 
-Raw ratios are transformed into the 100-point Predict+ scale using the training population's distribution:
+Raw ratios are transformed into the 100-point Deception+ scale using the training population's distribution:
 
 ```
 μ    = mean(Unpredictability_Ratio across all pitchers in reference population)
 σ    = standard_deviation(Unpredictability_Ratio across reference population)
 
-Predict+ = 100 + 10 × ( (Unpredictability_Ratio - μ) / σ )
+Deception+ = 100 + 10 × ( (Unpredictability_Ratio - μ) / σ )
 ```
 
 **Reference population for standardization:**
@@ -245,7 +245,7 @@ In daily mode, a pre-computed `baseline_params.rds` (generated from 100 random 5
 
 ## 8. Alternative Metric: PPI
 
-Alongside Predict+, the pipeline computes an alternative metric called the **Pitch Predictability Index (PPI)**:
+Alongside Deception+, the pipeline computes an alternative metric called the **Pitch Predictability Index (PPI)**:
 
 ```
 PPI = 1 - (Mean_S_model / Mean_S_baseline)
@@ -258,9 +258,9 @@ PPI = 1 - (Mean_S_model / Mean_S_baseline)
 | 0.0 | Both models equally surprised (average) |
 | -1.0 | Baseline always more surprised (complex model captures all patterns) |
 
-PPI lives on the range [-1, 1] and is clamped to that range. It is an intuitive complement to Predict+ for users who prefer a bounded scale.
+PPI lives on the range [-1, 1] and is clamped to that range. It is an intuitive complement to Deception+ for users who prefer a bounded scale.
 
-**Dynasty Index recommendation:** Surface Predict+ as the primary metric (familiar scale, comparable to ERA+) and PPI as a secondary detail for users who want the raw ratio information.
+**Dynasty Index recommendation:** Surface Deception+ as the primary metric (familiar scale, comparable to ERA+) and PPI as a secondary detail for users who want the raw ratio information.
 
 ---
 
@@ -350,7 +350,7 @@ pitcher_level:
 
 Using the reference `μ` and `σ` from the training population:
 ```
-predict_plus = 100 + 10 × ((unpredictability_ratio - μ) / σ)
+deception_plus = 100 + 10 × ((unpredictability_ratio - μ) / σ)
 ```
 
 ### Step 9: Name Resolution
@@ -421,7 +421,7 @@ Run once (or periodically) to establish the reference distribution for standardi
 | `mean_surp_base` | numeric | Average per-pitch surprise from the baseline model (nats) |
 | `ppi` | numeric | Pitch Predictability Index: `1 - (mean_surp_model / mean_surp_base)`, clamped to [-1, 1] |
 | `unpredictability_ratio` | numeric | `mean_surp_model / mean_surp_base` |
-| `predict_plus` | numeric | Final standardized score (mean = 100, SD = 10) |
+| `deception_plus` | numeric | Final standardized score (mean = 100, SD = 10) |
 
 ### Additional Columns (daily mode only)
 
@@ -482,7 +482,7 @@ Pitchers below minimum thresholds are excluded from the output CSV entirely in f
 
 ## 14. Interpreting Extreme Scores
 
-### High Predict+ (115+): What's Happening
+### High Deception+ (115+): What's Happening
 
 - **Situational independence**: Pitch selection does not shift based on count, runners, or score
 - **Sequence independence**: Previous pitch does not predict the next
@@ -491,7 +491,7 @@ Pitchers below minimum thresholds are excluded from the output CSV entirely in f
 
 **Real example:** A reliever with only a fastball and slider who alternates them seemingly at random regardless of count, batter, or score will have a very high ratio — neither model can anticipate which he will throw.
 
-### Low Predict+ (85 and below): What's Happening
+### Low Deception+ (85 and below): What's Happening
 
 - **Strong count patterns**: e.g., always throws fastball 0-0, always throws offspeed with 2 strikes
 - **Strict sequencing**: e.g., always follows fastball with breaking ball
@@ -508,10 +508,10 @@ The following relationships have been observed in 2025 Statcast data, holding fo
 
 | Outcome | Direction | Interpretation |
 |---------|-----------|---------------|
-| xFIP | Negative | Higher Predict+ → lower xFIP → better performance |
-| SIERA | Negative | Higher Predict+ → lower SIERA → better performance |
-| SwStr% | Positive | Higher Predict+ → more swinging strikes |
-| K% | Positive | Higher Predict+ → more strikeouts |
+| xFIP | Negative | Higher Deception+ → lower xFIP → better performance |
+| SIERA | Negative | Higher Deception+ → lower SIERA → better performance |
+| SwStr% | Positive | Higher Deception+ → more swinging strikes |
+| K% | Positive | Higher Deception+ → more strikeouts |
 
 Effect sizes are meaningful but not overwhelming — unpredictability is one factor among many. The correlations persist after controlling for raw pitch quality metrics.
 
@@ -546,7 +546,7 @@ Effect sizes are meaningful but not overwhelming — unpredictability is one fac
 | **Conditional baseline** | Pitch type frequencies within specific count/situation cells |
 | **Hybrid baseline** | Conditional when cell has ≥5 observations, marginal otherwise |
 | **PPI** | Pitch Predictability Index: `1 - Unpredictability_Ratio`, range [-1, 1] |
-| **Predict+** | Standardized metric: `100 + 10 × z-score of Unpredictability_Ratio` |
+| **Deception+** | Standardized metric: `100 + 10 × z-score of Unpredictability_Ratio` |
 | **MLBAM ID** | MLB Advanced Media player identifier used to join to other Statcast data |
 | **Times through order** | How many times a pitcher has faced a particular batter in the current game |
 | **Canonical pitch type** | Standardized pitch code from the 14-type taxonomy used internally |
@@ -556,5 +556,5 @@ Effect sizes are meaningful but not overwhelming — unpredictability is one fac
 
 ---
 
-*Source: [Predict+ on GitHub](https://github.com/comcgovern/PredictPlus) — Conor McGovern, 2025*
+*Source: [Deception+ on GitHub](https://github.com/comcgovern/PredictPlus) — Conor McGovern, 2025*
 *For commercial licensing inquiries: comcgovern@gmail.com*

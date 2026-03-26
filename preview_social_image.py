@@ -62,7 +62,7 @@ CHARTS = [
         data=starters_unpred,
         title="Least Predictable Starters",
         subtitle=f"{today}  ·  min 65 pitches",
-        caption=f"Higher = less predictable  ·  100 = league average  ·  @PredictPlus  ·  data: Baseball Savant",
+        caption=f"Higher = less predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#4361ee", color_high="#7209b7",
         fname=f"preview_starters_top5_unpredictable_{today_short}.png",
         desc_order=True,
@@ -71,7 +71,7 @@ CHARTS = [
         data=starters_pred,
         title="Most Predictable Starters",
         subtitle=f"{today}  ·  min 65 pitches",
-        caption=f"Lower = more predictable  ·  100 = league average  ·  @PredictPlus  ·  data: Baseball Savant",
+        caption=f"Lower = more predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#e63946", color_high="#f4a261",
         fname=f"preview_starters_top5_predictable_{today_short}.png",
         desc_order=False,
@@ -80,7 +80,7 @@ CHARTS = [
         data=relievers_unpred,
         title="Least Predictable Relievers",
         subtitle=f"{today}  ·  min 15 pitches",
-        caption=f"Higher = less predictable  ·  100 = league average  ·  @PredictPlus  ·  data: Baseball Savant",
+        caption=f"Higher = less predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#2a9d8f", color_high="#264653",
         fname=f"preview_relievers_top5_unpredictable_{today_short}.png",
         desc_order=True,
@@ -89,7 +89,7 @@ CHARTS = [
         data=relievers_pred,
         title="Most Predictable Relievers",
         subtitle=f"{today}  ·  min 15 pitches",
-        caption=f"Lower = more predictable  ·  100 = league average  ·  @PredictPlus  ·  data: Baseball Savant",
+        caption=f"Lower = more predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#e76f51", color_high="#f4a261",
         fname=f"preview_relievers_top5_predictable_{today_short}.png",
         desc_order=False,
@@ -155,7 +155,7 @@ def draw_chart(cfg):
 
     # X-axis
     ax.set_xlim(x_left, x_track)
-    ax.set_xlabel("Predict+  (100 = league average)", fontsize=10, color="#888888",
+    ax.set_xlabel("Deception+  (100 = league average)", fontsize=10, color="#888888",
                   labelpad=6)
     ax.tick_params(axis="x", labelsize=10, colors="#999999")
     ax.tick_params(axis="y", length=0)

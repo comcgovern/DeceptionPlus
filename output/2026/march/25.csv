@@ -1,4 +1,4 @@
-pitcher_id,pitcher_name,role,total_pitches,n_pitches_test,mean_surp_model,mean_surp_base,ppi,unpredictability_ratio,predict_plus,status
+pitcher_id,pitcher_name,role,total_pitches,n_pitches_test,mean_surp_model,mean_surp_base,ppi,unpredictability_ratio,deception_plus,status
 656234,Jake Bird,reliever,500,6,8.310882964630983,1.153238683500783,-1,7.206559304273753,120.13145453808751,evaluated
 668873,Caleb Kilian,reliever,167,9,12.31633433181666,2.02191307274784,-1,6.091426232819395,115.3956620294135,evaluated
 664141,JT Brubaker,reliever,469,22,2.6949423580121725,1.3734282947168024,-0.9622009888531262,1.9622009888531262,97.85950022273406,evaluated

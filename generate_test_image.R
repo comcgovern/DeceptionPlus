@@ -1,7 +1,7 @@
 # ============================================================================
 # generate_test_image.R — Preview social media graphic design with mock data
 # ----------------------------------------------------------------------------
-# Generates sample Predict+ social media images (1200x675 px, 16:9) without
+# Generates sample Deception+ social media images (1200x675 px, 16:9) without
 # needing to run the full MLB data pipeline.
 #
 # Usage:
@@ -22,7 +22,7 @@ for (pkg in c("ggplot2", "dplyr")) {
 source("pitch_ppi.R")
 
 # ---------------------------------------------------------------------------
-# Mock pitcher data — realistic Predict+ score distribution (mean=100, sd=10)
+# Mock pitcher data — realistic Deception+ score distribution (mean=100, sd=10)
 # ---------------------------------------------------------------------------
 set.seed(42)
 
@@ -40,7 +40,7 @@ mock_starters <- data.frame(
   mean_surp_model = runif(14, 0.3, 0.8),
   mean_surp_base  = runif(14, 0.4, 0.7),
   ppi             = runif(14, 0.6, 1.4),
-  predict_plus    = c(128, 121, 116, 112, 109, 106, 103, 99, 97, 94, 91, 88, 85, 81),
+  deception_plus    = c(128, 121, 116, 112, 109, 106, 103, 99, 97, 94, 91, 88, 85, 81),
   status          = "evaluated",
   stringsAsFactors = FALSE
 )
@@ -58,7 +58,7 @@ mock_relievers <- data.frame(
   mean_surp_model = runif(12, 0.3, 0.9),
   mean_surp_base  = runif(12, 0.4, 0.7),
   ppi             = runif(12, 0.6, 1.5),
-  predict_plus    = c(133, 125, 119, 114, 110, 107, 102, 97, 93, 89, 84, 78),
+  deception_plus    = c(133, 125, 119, 114, 110, 107, 102, 97, 93, 89, 84, 78),
   status          = "evaluated",
   stringsAsFactors = FALSE
 )
