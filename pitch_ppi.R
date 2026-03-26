@@ -1738,7 +1738,7 @@ create_social_media_graphics <- function(res,
 parse_csv_list <- function(x) { if (is.null(x) || is.na(x) || x == "") return(character(0)); trimws(unlist(strsplit(x, ","))) }
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) > 0) {
+if (length(args) > 0 && any(args == "--train_start")) {
   get_arg <- function(flag, default = NULL) { hit <- which(args == flag); if (length(hit) == 1 && hit < length(args)) args[hit + 1] else default }
   
   train_start <- get_arg("--train_start")
