@@ -107,7 +107,7 @@ jobs:
           else
             git commit -m "feat: compute baseline parameters for Predict+ standardization
 
-            - Computed mu/sigma from 2023-2025 historical data (100 random splits)
+            - Computed mu/sigma from 2023-2025 historical data (30 random splits)
             - Enables proper Predict+ = 100 +/- 10 scaling in daily analysis
             - Recompute annually with: Actions > Compute Baseline Parameters"
 
