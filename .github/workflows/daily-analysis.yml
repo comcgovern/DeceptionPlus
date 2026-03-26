@@ -131,7 +131,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
 
       - name: Cache R packages
         uses: actions/cache@v4
@@ -148,7 +148,8 @@ jobs:
           install.packages(c(
             "dplyr", "tidyr", "purrr", "stringr", "lubridate",
             "nnet", "readr", "tibble", "forcats",
-            "httr", "jsonlite", "ggplot2", "scales"
+            "httr", "jsonlite", "ggplot2", "scales",
+            "showtext", "sysfonts"
           ), repos = "https://cloud.r-project.org")
 
           # Install sabRmetrics from GitHub
