@@ -249,6 +249,35 @@ jobs:
             echo "### Output Files" >> $GITHUB_STEP_SUMMARY
             echo "- CSV: \`${CSV}\`" >> $GITHUB_STEP_SUMMARY
             echo "- Visualizations: \`output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/visualizations/\`" >> $GITHUB_STEP_SUMMARY
+
+            # Orioles pitcher summary (MLB only)
+            if [ "${LEVEL}" == "MLB" ]; then
+              YEAR=${{ steps.check_outputs.outputs.year }}
+              MONTH=${{ steps.check_outputs.outputs.month }}
+              DAY=$(date -d "$DATE" '+%d')
+              ORIOLES_CSV="output/${YEAR}/${MONTH}/orioles_${DAY}.csv"
+
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Baltimore Orioles Pitcher Predict+ Scores (≥ 10 pitches)" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+
+              if [ -f "$ORIOLES_CSV" ]; then
+                python3 - "$ORIOLES_CSV" >> $GITHUB_STEP_SUMMARY << 'PYEOF'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+if rows:
+    print("| Pitcher | Role | Pitches | Predict+ | Status |")
+    print("|---------|------|---------|----------|--------|")
+    for r in rows:
+        pplus = f"{float(r['predict_plus']):.1f}" if r.get('predict_plus') else "N/A"
+        print(f"| {r['pitcher_name']} | {r['role']} | {r['n_pitches_test']} | {pplus} | {r['status']} |")
+else:
+    print("No Orioles pitchers threw ≥ 10 pitches.")
+PYEOF
+              else
+                echo "No Orioles pitchers appeared (or no team data available)." >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
           else
             echo "**Status:** No output generated" >> $GITHUB_STEP_SUMMARY
           fi
