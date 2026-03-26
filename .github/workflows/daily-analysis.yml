@@ -1,7 +1,7 @@
 # ============================================================================
 # Daily Predict+ Analysis Workflow
 # ============================================================================
-# Runs at 1:00 AM UTC daily to analyze the previous day's MLB games.
+# Runs at 7:00 AM UTC daily to analyze the previous day's MLB games.
 # Uses per-pitcher models: each pitcher evaluated against their own patterns.
 #
 # Approach:
@@ -12,15 +12,16 @@
 #
 # Outputs are committed back to the repository in:
 #   output/{year}/{month}/{day}.csv
+#   output/{year}/{month}/orioles_{day}.csv
 #   output/{year}/{month}/visualizations/
 # ============================================================================
 
 name: Daily Predict+ Analysis
 
 on:
-  # Run at 1:00 AM UTC daily
+  # Run at 7:00 AM UTC daily (gives Statcast time to populate after games)
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 7 * * *'
 
   # Allow manual trigger with optional date override
   workflow_dispatch:
@@ -196,6 +197,7 @@ jobs:
             echo "csv_path=$CSV_PATH" >> $GITHUB_OUTPUT
             echo "year=$YEAR" >> $GITHUB_OUTPUT
             echo "month=$MONTH" >> $GITHUB_OUTPUT
+            echo "day=$DAY" >> $GITHUB_OUTPUT
           else
             echo "has_output=false" >> $GITHUB_OUTPUT
             echo "No output CSV found for $DATE"
@@ -282,11 +284,21 @@ PYEOF
             echo "**Status:** No output generated" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload artifacts
+      - name: Upload MLB all-pitchers artifact
         if: steps.check_outputs.outputs.has_output == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: daily-analysis-${{ needs.check-games.outputs.date }}
+          name: mlb-all-pitchers-${{ needs.check-games.outputs.date }}
           path: |
-            output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/
+            ${{ steps.check_outputs.outputs.csv_path }}
+            output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/visualizations/
+          retention-days: 30
+
+      - name: Upload Orioles artifact
+        if: steps.check_outputs.outputs.has_output == 'true' && needs.check-games.outputs.level == 'MLB'
+        uses: actions/upload-artifact@v4
+        with:
+          name: orioles-pitchers-${{ needs.check-games.outputs.date }}
+          path: |
+            output/${{ steps.check_outputs.outputs.year }}/${{ steps.check_outputs.outputs.month }}/orioles_${{ steps.check_outputs.outputs.day }}.csv
           retention-days: 30
