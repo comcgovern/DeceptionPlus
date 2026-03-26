@@ -60,7 +60,7 @@ relievers_pred = [
 CHARTS = [
     dict(
         data=starters_unpred,
-        title="Least Predictable Starters",
+        title="Least Deceptive Starters",
         subtitle=f"{today}  ·  min 65 pitches",
         caption=f"Higher = less predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#4361ee", color_high="#7209b7",
@@ -69,7 +69,7 @@ CHARTS = [
     ),
     dict(
         data=starters_pred,
-        title="Most Predictable Starters",
+        title="Most Deceptive Starters",
         subtitle=f"{today}  ·  min 65 pitches",
         caption=f"Lower = more predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#e63946", color_high="#f4a261",
@@ -78,7 +78,7 @@ CHARTS = [
     ),
     dict(
         data=relievers_unpred,
-        title="Least Predictable Relievers",
+        title="Least Deceptive Relievers",
         subtitle=f"{today}  ·  min 15 pitches",
         caption=f"Higher = less predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#2a9d8f", color_high="#264653",
@@ -87,7 +87,7 @@ CHARTS = [
     ),
     dict(
         data=relievers_pred,
-        title="Most Predictable Relievers",
+        title="Most Deceptive Relievers",
         subtitle=f"{today}  ·  min 15 pitches",
         caption=f"Lower = more predictable  ·  100 = league average  ·  @DeceptionPlus  ·  data: Baseball Savant",
         color_low="#e76f51", color_high="#f4a261",
