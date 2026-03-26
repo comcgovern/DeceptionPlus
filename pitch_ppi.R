@@ -54,7 +54,7 @@ load_statcast_range <- function(start_date, end_date, game_type = "R", level = "
   # For MLB, use sabRmetrics (it works perfectly)
   if (level == "MLB") {
     if (!requireNamespace("sabRmetrics", quietly = TRUE)) {
-      stop("Please install 'sabRmetrics' (install.packages('sabRmetrics')).")
+      stop("Please install 'sabRmetrics': devtools::install_github('saberpowers/sabRmetrics')")
     }
     if (verbose) message("Downloading Savant (MLB): ", start_date, " -> ", end_date, " | game_type=", game_type)
     df <- try(sabRmetrics::download_baseballsavant(
