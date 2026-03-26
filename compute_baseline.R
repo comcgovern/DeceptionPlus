@@ -29,7 +29,7 @@ BASELINE_START <- "2023-03-30"  # 2023 Opening Day
 BASELINE_END   <- "2025-09-28"  # End of 2025 regular season (adjust as needed)
 
 # Number of random splits to average
-N_RUNS <- 100
+N_RUNS <- 30
 
 # Minimum pitches per pitcher to include in baseline
 MIN_PITCHES <- 100
