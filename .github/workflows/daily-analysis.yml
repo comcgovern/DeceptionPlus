@@ -112,6 +112,8 @@ jobs:
     needs: check-games
     if: needs.check-games.outputs.has_games == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
