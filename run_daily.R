@@ -288,12 +288,16 @@ message("  History data: ", nrow(df_history), " pitches from ",
 
 message("\nEvaluating per-pitcher unpredictability...")
 
+# Use the same baseline keys that were used to compute baseline_params (mu/sigma)
+BASELINE_KEYS <- baseline_params$baseline_keys %||% c("balls", "strikes", "stand", "two_strikes")
+
 eval_result <- evaluate_per_pitcher(
   df_history = df_history,
   df_test = df_test,
   min_train_pitches = MIN_HISTORY_PITCHES,
   min_test_pitches = 1,  # Include all pitchers with any test pitches
   feature_names = FEATURE_NAMES,
+  baseline_keys = BASELINE_KEYS,
   verbose = TRUE
 )
 

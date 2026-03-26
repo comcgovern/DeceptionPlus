@@ -348,7 +348,7 @@ engineer_features <- function(raw, include_batter_metrics = TRUE) {
     balls           = suppressWarnings(as.integer(coalesce(.data$balls, 0))),
     strikes         = suppressWarnings(as.integer(coalesce(.data$strikes, 0))),
     two_strikes     = if_else(.data$strikes == 2L, 1L, 0L),
-    ahead_in_count  = if_else(.data$balls > .data$strikes, 1L, 0L),
+    ahead_in_count  = if_else(.data$strikes > .data$balls, 1L, 0L),
     base_state      = base_state_row(.data$on_1b, .data$on_2b, .data$on_3b),
     is_risp         = if_else(!is.na(.data$on_2b) | !is.na(.data$on_3b), 1L, 0L),
     # score_diff from the pitcher's perspective:
@@ -702,6 +702,8 @@ evaluate_per_pitcher <- function(df_history,
                                   feature_names = c("balls", "strikes", "two_strikes",
                                                     "ahead_in_count", "outs", "is_risp",
                                                     "stand", "last_pitch_type"),
+                                  baseline_keys = c("balls", "strikes", "stand", "two_strikes"),
+                                  baseline_type = "conditional",
                                   verbose = TRUE) {
 
   # Prepare factor columns for history data
@@ -843,16 +845,17 @@ evaluate_per_pitcher <- function(df_history,
     p_true    <- P[cbind(seq_len(nrow(te2)), idx_true)]
     surp_model <- -log(pmax(p_true, eps))
 
-    # Baseline: pitcher's own marginal pitch frequencies from history
-    pitch_freqs <- table(tr2$pitch_class)
-    pitch_probs <- (pitch_freqs + 1) / sum(pitch_freqs + 1)  # Add-1 smoothing
-    p_base      <- pitch_probs[as.character(te2$pitch_class)]
-    surp_base   <- -log(pmax(as.numeric(p_base), eps))
+    # Baseline: conditional on count/situation (matches seasonal model methodology)
+    P_base <- compute_baseline_probs(tr2, te2,
+                                      baseline_type = baseline_type,
+                                      baseline_keys = baseline_keys)
+    p_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
+    surp_base <- -log(pmax(as.numeric(p_base), eps))
 
     tibble(
       pitcher_id             = pid,
       n_history              = nrow(ptr_history),
-      n_test                 = nrow(ptr_test),
+      n_test                 = nrow(te2),
       mean_surp_model        = mean(surp_model),
       mean_surp_base         = mean(surp_base),
       unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps)
