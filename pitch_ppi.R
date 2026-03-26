@@ -1012,6 +1012,11 @@ train_ppi <- function(train_start, train_end,
     if (verbose) message("Random seed set to: ", random_seed)
   }
 
+  # Only compute batter metrics (o_swing_pct, z_contact_pct, etc.) when the
+  # caller's feature set actually uses them — avoids an expensive join on large data.
+  batter_metric_cols <- c("o_swing_pct", "z_contact_pct", "swing_pct", "chase_contact_pct")
+  needs_batter_metrics <- any(batter_metric_cols %in% feature_names)
+
   # ========== STEP 1: Load data ==========
   if (split_method == "random") {
     # RANDOM SPLIT: Load all data for period, then split by pitcher
@@ -1035,7 +1040,7 @@ train_ppi <- function(train_start, train_end,
       } else stop("No data found for the given range.")
     }
 
-    df_all <- engineer_features(raw_all)
+    df_all <- engineer_features(raw_all, include_batter_metrics = needs_batter_metrics)
     if (nrow(df_all) == 0) stop("No usable rows after feature engineering.")
     df_all <- df_all %>% filter(!is.na(pitcher_id))
 
@@ -1084,7 +1089,7 @@ train_ppi <- function(train_start, train_end,
       } else stop("No training data found for the given range.")
     }
 
-    df_train <- engineer_features(raw_train)
+    df_train <- engineer_features(raw_train, include_batter_metrics = needs_batter_metrics)
     if (nrow(df_train) == 0) stop("No usable training rows after feature engineering.")
     df_train <- df_train %>% filter(!is.na(pitcher_id))
 
@@ -1110,7 +1115,7 @@ train_ppi <- function(train_start, train_end,
       } else stop("No test data found for the given range.")
     }
 
-    df_test <- engineer_features(raw_test)
+    df_test <- engineer_features(raw_test, include_batter_metrics = needs_batter_metrics)
     if (nrow(df_test) == 0) stop("No usable test rows after feature engineering.")
     df_test <- df_test %>% filter(!is.na(pitcher_id))
 
