@@ -1554,28 +1554,28 @@ create_social_media_graphics <- function(res,
     theme_minimal(base_size = 14) +
       theme(
         # Left-aligned title gives a cleaner editorial look
-        plot.title      = element_text(face = "bold", size = 20, hjust = 0,
-                                       color = "#1a1a2e", margin = margin(b = 3)),
-        plot.subtitle   = element_text(size = 12, hjust = 0, color = "#666666",
-                                       margin = margin(b = 10)),
+        plot.title      = element_text(face = "bold", size = 22, hjust = 0,
+                                       color = "#1a1a2e", margin = margin(b = 4)),
+        plot.subtitle   = element_text(size = 12, hjust = 0, color = "#777777",
+                                       margin = margin(b = 14)),
         plot.caption    = element_text(size = 9, color = "#aaaaaa", hjust = 1,
-                                       margin = margin(t = 8)),
+                                       margin = margin(t = 10)),
         # Subtle vertical grid only; no horizontal clutter
-        panel.grid.major.x = element_line(color = "#eeeeee", linewidth = 0.5),
+        panel.grid.major.x = element_line(color = "#e8e8e8", linewidth = 0.5),
         panel.grid.major.y = element_blank(),
         panel.grid.minor   = element_blank(),
         # Pitcher names: bold, easy to read
-        axis.text.y     = element_text(size = 12, face = "bold", color = "#2d2d2d",
+        axis.text.y     = element_text(size = 13, face = "bold", color = "#1a1a2e",
                                        hjust = 1),
         axis.text.x     = element_text(size = 10, color = "#999999"),
         axis.title.x    = element_text(size = 10, color = "#888888",
-                                       margin = margin(t = 6)),
+                                       margin = margin(t = 8)),
         axis.title.y    = element_blank(),
-        # Clean white canvas; faint warm-gray panel area
+        # Clean white canvas; light panel
         plot.background  = element_rect(fill = "#ffffff", color = NA),
-        panel.background = element_rect(fill = "#fafafa", color = NA),
-        # Extra right/top margin to avoid clipping score labels and title
-        plot.margin = margin(22, 36, 14, 20)
+        panel.background = element_rect(fill = "#f7f7f7", color = NA),
+        # Extra right margin for score labels, generous top/bottom padding
+        plot.margin = margin(24, 40, 16, 24)
       )
   }
 
@@ -1603,32 +1603,43 @@ create_social_media_graphics <- function(res,
                else               data$name_label[order(-data$predict_plus)]
     )
 
-    # Track bar ceiling: a bit above the maximum score so labels have room
-    x_track <- max(data$predict_plus, 110) * 1.20
-    # x-axis left edge: don't start at zero — Predict+ is centred at 100
-    x_left  <- min(data$predict_plus, 90) * 0.94
-    data$x_track <- x_track   # attach as column for geom_col reference
+    # Axis bounds in original Predict+ units
+    x_left  <- floor(min(data$predict_plus, 90)) - 4   # a few units left of the minimum
+    x_track <- ceiling(max(data$predict_plus, 110)) + 20  # room for score labels
+
+    # Shift origin to x_left so bars visually fill the chart from the left edge.
+    # geom_col draws from 0, so we express every x as (value - x_left).
+    data <- data %>% mutate(bar_shifted = predict_plus - x_left)
+    track_shifted <- x_track - x_left
+    avg_shifted   <- 100 - x_left
+
+    # Nice axis labels in original Predict+ units
+    raw_breaks  <- pretty(c(x_left, x_track), n = 5)
+    raw_breaks  <- raw_breaks[raw_breaks >= x_left & raw_breaks <= x_track]
+    plot_breaks <- raw_breaks - x_left
 
     p <- ggplot(data, aes(y = name_label)) +
       # Track bars (light gray background behind every bar)
-      geom_col(aes(x = x_track),
-               fill = "#efefef", width = 0.55, show.legend = FALSE) +
-      # Data bars with gradient fill
-      geom_col(aes(x = predict_plus, fill = predict_plus),
-               width = 0.55, show.legend = FALSE) +
+      geom_col(aes(x = track_shifted),
+               fill = "#e2e2e2", width = 0.62, show.legend = FALSE) +
+      # Data bars with gradient fill — now properly anchored at the left edge
+      geom_col(aes(x = bar_shifted, fill = predict_plus),
+               width = 0.62, show.legend = FALSE) +
       # League-average reference line
-      geom_vline(xintercept = 100, linetype = "dashed",
-                 color = "#bbbbbb", linewidth = 0.8) +
+      geom_vline(xintercept = avg_shifted, linetype = "dashed",
+                 color = "#aaaaaa", linewidth = 0.9) +
       # "AVG" annotation on the reference line
-      annotate("text", x = 100, y = 0.42, label = "AVG",
-               size = 2.8, color = "#bbbbbb", hjust = 0.5) +
-      # Score labels just outside the bar
-      geom_text(aes(x = predict_plus, label = score_label),
-                hjust = -0.28, size = 4.2, fontface = "bold", color = "#333333") +
+      annotate("text", x = avg_shifted, y = 0.42, label = "AVG",
+               size = 2.8, color = "#aaaaaa", hjust = 0.5) +
+      # Score labels just outside the bar end
+      geom_text(aes(x = bar_shifted, label = score_label),
+                hjust = -0.32, size = 4.5, fontface = "bold", color = "#333333") +
       scale_fill_gradient(low = fill_low, high = fill_high) +
       scale_x_continuous(
-        expand = expansion(mult = c(0, 0)),
-        limits = c(x_left, x_track)
+        expand = expansion(mult = c(0, 0.01)),
+        limits = c(0, track_shifted),
+        breaks = plot_breaks,
+        labels = as.integer(raw_breaks)
       ) +
       labs(
         title    = title,
