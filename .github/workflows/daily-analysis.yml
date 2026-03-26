@@ -1,5 +1,5 @@
 # ============================================================================
-# Daily Predict+ Analysis Workflow
+# Daily Deception+ Analysis Workflow
 # ============================================================================
 # Runs at 7:00 AM UTC daily to analyze the previous day's MLB games.
 # Uses per-pitcher models: each pitcher evaluated against their own patterns.
@@ -16,7 +16,7 @@
 #   output/{year}/{month}/visualizations/
 # ============================================================================
 
-name: Daily Predict+ Analysis
+name: Daily Deception+ Analysis
 
 on:
   # Run at 7:00 AM UTC daily (gives Statcast time to populate after games)
@@ -222,7 +222,7 @@ jobs:
           else
             git commit -m "Daily analysis: ${LEVEL} ${DATE}
 
-            - Added ${LEVEL} Predict+ analysis for ${DATE}
+            - Added ${LEVEL} Deception+ analysis for ${DATE}
             - Generated social media graphics
             - Updated pitcher name cache"
 
@@ -235,7 +235,7 @@ jobs:
           DATE="${{ needs.check-games.outputs.date }}"
           LEVEL="${{ needs.check-games.outputs.level }}"
 
-          echo "## Daily Predict+ Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Daily Deception+ Analysis Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Date:** ${DATE}" >> $GITHUB_STEP_SUMMARY
           echo "**Level:** ${LEVEL}" >> $GITHUB_STEP_SUMMARY
@@ -261,7 +261,7 @@ jobs:
               ORIOLES_CSV="output/${YEAR}/${MONTH}/orioles_${DAY}.csv"
 
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Baltimore Orioles Pitcher Predict+ Scores (≥ 10 pitches)" >> $GITHUB_STEP_SUMMARY
+              echo "### Baltimore Orioles Pitcher Deception+ Scores (≥ 10 pitches)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
 
               if [ -f "$ORIOLES_CSV" ]; then

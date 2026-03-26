@@ -1,10 +1,10 @@
-# Methodology: How Predict+ Works
+# Methodology: How Deception+ Works
 
-This document explains the technical approach behind Predict+ for those interested in the statistical and information-theoretic foundations.
+This document explains the technical approach behind Deception+ for those interested in the statistical and information-theoretic foundations.
 
 ## Overview
 
-Predict+ measures pitcher unpredictability by quantifying how much a pitcher's actual pitch choices "surprise" a machine learning model that has learned their patterns. If a sophisticated model that knows everything about game context, pitcher history, and sequencing patterns still can't predict what you'll throw, you're genuinely unpredictable.
+Deception+ measures pitcher unpredictability by quantifying how much a pitcher's actual pitch choices "surprise" a machine learning model that has learned their patterns. If a sophisticated model that knows everything about game context, pitcher history, and sequencing patterns still can't predict what you'll throw, you're genuinely unpredictable.
 
 ## The Predictability Challenge
 
@@ -24,7 +24,7 @@ Consider two pitchers with identical 60/40 fastball/slider arsenals:
 - No consistent pattern by situation
 - Situationally independent
 
-Both have the same pitch mix, but Pitcher A follows predictable rules while Pitcher B doesn't. Traditional pitch mix metrics can't distinguish them. **Predict+ can.**
+Both have the same pitch mix, but Pitcher A follows predictable rules while Pitcher B doesn't. Traditional pitch mix metrics can't distinguish them. **Deception+ can.**
 
 ## Information-Theoretic Foundation
 
@@ -68,7 +68,7 @@ entropy <- -sum(freqs * log(freqs))
 2. **Marginal only**: Doesn't capture conditional patterns
 3. **No validation**: Can't test predictions against reality
 
-Predict+ uses *conditional* surprise from an actual predictive model, then compares against a baseline.
+Deception+ uses *conditional* surprise from an actual predictive model, then compares against a baseline.
 
 ## The Two-Model Approach
 
@@ -181,7 +181,7 @@ The ratio isolates genuine unpredictability from:
 
 What remains is **situational independence** — pitchers who don't follow learnable patterns even when we account for context.
 
-## Standardization: Predict+
+## Standardization: Deception+
 
 Raw ratios are hard to interpret. We standardize to a scaled metric:
 
@@ -189,7 +189,7 @@ Raw ratios are hard to interpret. We standardize to a scaled metric:
 μ = mean(Unpredictability_Ratio across all pitchers)
 σ = std(Unpredictability_Ratio across all pitchers)
 
-Predict+ = 100 + 10 × ((Unpredictability_Ratio - μ) / σ)
+Deception+ = 100 + 10 × ((Unpredictability_Ratio - μ) / σ)
 ```
 
 This gives us:
@@ -365,12 +365,12 @@ pitcher_stats <- test_data %>%
 
 ### Correlations with Performance
 
-Negative correlation with xFIP means: higher Predict+ → lower xFIP → better performance.
-Positive correlation with SwStr% means: higher Predict+ → more swinging strikes.
+Negative correlation with xFIP means: higher Deception+ → lower xFIP → better performance.
+Positive correlation with SwStr% means: higher Deception+ → more swinging strikes.
 
 ### Two-Pitch Pitcher Case Study
 
-Trevor Megill (2-pitch reliever): **Very high Predict+ score in 2025**
+Trevor Megill (2-pitch reliever): **Very high Deception+ score in 2025**
 
 **Interpretation:**
 - Only throws fastball and slider
@@ -382,13 +382,13 @@ Trevor Megill (2-pitch reliever): **Very high Predict+ score in 2025**
 
 ### What Makes Scores Extreme?
 
-**High Predict+ (115+):**
+**High Deception+ (115+):**
 - Situational independence (no count/runner patterns)
 - Balanced usage in traditionally "obvious" situations
 - Sequence unpredictability (previous pitch doesn't matter)
 - Two-pitch pitchers who don't follow rules
 
-**Low Predict+ (85-):**
+**Low Deception+ (85-):**
 - Strong count-based patterns
 - Clear sequencing rules
 - Runner-dependent strategies
@@ -409,7 +409,7 @@ Trevor Megill (2-pitch reliever): **Very high Predict+ score in 2025**
 **Catcher Integration**
 Extend to pitcher-catcher dyads:
 ```r
-predict_plus_with_catcher_A - predict_plus_with_other_catchers
+deception_plus_with_catcher_A - deception_plus_with_other_catchers
 → Catcher A's game-calling effect
 ```
 
@@ -434,8 +434,8 @@ Test whether random forests, XGBoost improve predictions:
 **Platoon-Specific**
 Separate scores vs. LHH and RHH:
 ```r
-predict_plus_vs_LHH
-predict_plus_vs_RHH
+deception_plus_vs_LHH
+deception_plus_vs_RHH
 ```
 
 ---

@@ -4,7 +4,7 @@
 # - Downloads (and caches) Statcast pitches via sabRmetrics::download_baseballsavant()
 # - Resolves pitcher names from MLB StatsAPI with on-disk cache; baseballr fallback
 # - Trains multinomial model on one period; evaluates on another (can be same/overlapping)
-# - Outputs per-pitcher table with PPI + Predict+ (avg=100; 10 pts = 1 SD)
+# - Outputs per-pitcher table with PPI + Deception+ (avg=100; 10 pts = 1 SD)
 # - Supports multiple baseline models: "marginal", "conditional", "hybrid"
 # - Organizes outputs into subfolders: cache/, models/, output/
 # ============================================================================
@@ -1310,7 +1310,7 @@ train_ppi <- function(train_start, train_end,
     distinct(pitcher_id)
   name_map <- resolve_pitcher_names_with_fallback(all_pitcher_ids, cache_file = "cache/mlbam_name_cache.csv", verbose = verbose)
   
-  # ========== STEP 9: Calculate Predict+ ==========
+  # ========== STEP 9: Calculate Deception+ ==========
   # Join and filter to get the final population
   pitcher_ppi <- all_pitchers %>%
     left_join(per_pitcher_test, by = "pitcher_id") %>%
@@ -1325,21 +1325,21 @@ train_ppi <- function(train_start, train_end,
   # but scores are anchored to a stable reference population.
   pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      predict_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-9))
+      deception_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-9))
     ) %>%
     select(
       pitcher_id, pitcher_name, total_pitches, n_pitches_test,
       mean_surp_model, mean_surp_base, ppi,
-      unpredictability_ratio, predict_plus
+      unpredictability_ratio, deception_plus
     ) %>%
-    arrange(desc(predict_plus))
+    arrange(desc(deception_plus))
   
   if (verbose) {
     message("\n✅ Analysis complete!")
     message("   Pitchers evaluated: ", nrow(pitcher_ppi))
-    message("   Mean Predict+: ", round(mean(pitcher_ppi$predict_plus, na.rm = TRUE), 1))
-    message("   Range: ", round(min(pitcher_ppi$predict_plus, na.rm = TRUE), 1), 
-            " to ", round(max(pitcher_ppi$predict_plus, na.rm = TRUE), 1))
+    message("   Mean Deception+: ", round(mean(pitcher_ppi$deception_plus, na.rm = TRUE), 1))
+    message("   Range: ", round(min(pitcher_ppi$deception_plus, na.rm = TRUE), 1), 
+            " to ", round(max(pitcher_ppi$deception_plus, na.rm = TRUE), 1))
   }
   
   list(model = mod,
@@ -1452,15 +1452,15 @@ create_visualizations <- function(res, output_dir = "output/visualizations") {
   
   library(ggplot2)
   
-  # 1. Predict+ distribution
-  p1 <- ggplot(res$pitcher_ppi, aes(x = predict_plus)) +
+  # 1. Deception+ distribution
+  p1 <- ggplot(res$pitcher_ppi, aes(x = deception_plus)) +
     geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
     geom_vline(xintercept = 100, linetype = "dashed", color = "red") +
-    labs(title = "Distribution of Predict+ Scores",
+    labs(title = "Distribution of Deception+ Scores",
          subtitle = paste0("Mean = 100, SD = 10 | n = ", nrow(res$pitcher_ppi)),
-         x = "Predict+", y = "Count") +
+         x = "Deception+", y = "Count") +
     theme_minimal()
-  ggsave(file.path(output_dir, "predict_plus_distribution.png"), p1, width = 10, height = 6)
+  ggsave(file.path(output_dir, "deception_plus_distribution.png"), p1, width = 10, height = 6)
   
   # 2. PPI vs Total Pitches
   p2 <- ggplot(res$pitcher_ppi, aes(x = total_pitches, y = ppi)) +
@@ -1473,31 +1473,31 @@ create_visualizations <- function(res, output_dir = "output/visualizations") {
   
   # 3. Top 20 Most Predictable
   top20_pred <- res$pitcher_ppi %>% 
-    arrange(predict_plus) %>% 
+    arrange(deception_plus) %>% 
     head(20) %>%
-    mutate(pitcher_name = reorder(pitcher_name, -predict_plus))
+    mutate(pitcher_name = reorder(pitcher_name, -deception_plus))
   
-  p3 <- ggplot(top20_pred, aes(x = predict_plus, y = pitcher_name)) +
+  p3 <- ggplot(top20_pred, aes(x = deception_plus, y = pitcher_name)) +
     geom_col(fill = "coral") +
     geom_vline(xintercept = 100, linetype = "dashed", color = "darkgray") +
     labs(title = "Top 20 Most Predictable Pitchers",
-         subtitle = "Lower Predict+ = More Predictable",
-         x = "Predict+", y = NULL) +
+         subtitle = "Lower Deception+ = More Predictable",
+         x = "Deception+", y = NULL) +
     theme_minimal()
   ggsave(file.path(output_dir, "top20_predictable.png"), p3, width = 10, height = 8)
   
   # 4. Top 20 Least Predictable
   top20_unpred <- res$pitcher_ppi %>% 
-    arrange(desc(predict_plus)) %>% 
+    arrange(desc(deception_plus)) %>% 
     head(20) %>%
-    mutate(pitcher_name = reorder(pitcher_name, predict_plus))
+    mutate(pitcher_name = reorder(pitcher_name, deception_plus))
   
-  p4 <- ggplot(top20_unpred, aes(x = predict_plus, y = pitcher_name)) +
+  p4 <- ggplot(top20_unpred, aes(x = deception_plus, y = pitcher_name)) +
     geom_col(fill = "steelblue") +
     geom_vline(xintercept = 100, linetype = "dashed", color = "darkgray") +
     labs(title = "Top 20 Least Predictable Pitchers",
-         subtitle = "Higher Predict+ = Less Predictable",
-         x = "Predict+", y = NULL) +
+         subtitle = "Higher Deception+ = Less Predictable",
+         x = "Deception+", y = NULL) +
     theme_minimal()
   ggsave(file.path(output_dir, "top20_unpredictable.png"), p4, width = 10, height = 8)
   
@@ -1616,31 +1616,31 @@ create_social_media_graphics <- function(res,
 
     # Rank-order the rows, then build labelled factor for y-axis
     data <- data %>%
-      arrange(if (reorder_desc) desc(predict_plus) else predict_plus) %>%
+      arrange(if (reorder_desc) desc(deception_plus) else deception_plus) %>%
       mutate(
         rank       = row_number(),
         name_label = paste0("#", rank, "  ", pitcher_name),
-        score_label = sprintf("%.0f", predict_plus)
+        score_label = sprintf("%.0f", deception_plus)
       )
 
     # Factor levels: lowest bar at bottom, highest at top (ggplot reads bottom-up)
     data$name_label <- factor(
       data$name_label,
-      levels = if (reorder_desc) data$name_label[order(data$predict_plus)]
-               else               data$name_label[order(-data$predict_plus)]
+      levels = if (reorder_desc) data$name_label[order(data$deception_plus)]
+               else               data$name_label[order(-data$deception_plus)]
     )
 
-    # Axis bounds in original Predict+ units
-    x_left  <- floor(min(data$predict_plus, 90)) - 4   # a few units left of the minimum
-    x_track <- ceiling(max(data$predict_plus, 110)) + 20  # room for score labels
+    # Axis bounds in original Deception+ units
+    x_left  <- floor(min(data$deception_plus, 90)) - 4   # a few units left of the minimum
+    x_track <- ceiling(max(data$deception_plus, 110)) + 20  # room for score labels
 
     # Shift origin to x_left so bars visually fill the chart from the left edge.
     # geom_col draws from 0, so we express every x as (value - x_left).
-    data <- data %>% mutate(bar_shifted = predict_plus - x_left)
+    data <- data %>% mutate(bar_shifted = deception_plus - x_left)
     track_shifted <- x_track - x_left
     avg_shifted   <- 100 - x_left
 
-    # Nice axis labels in original Predict+ units
+    # Nice axis labels in original Deception+ units
     raw_breaks  <- pretty(c(x_left, x_track), n = 5)
     raw_breaks  <- raw_breaks[raw_breaks >= x_left & raw_breaks <= x_track]
     plot_breaks <- raw_breaks - x_left
@@ -1650,7 +1650,7 @@ create_social_media_graphics <- function(res,
       geom_col(aes(x = track_shifted),
                fill = "#e2e2e2", width = 0.62, show.legend = FALSE) +
       # Data bars with gradient fill — now properly anchored at the left edge
-      geom_col(aes(x = bar_shifted, fill = predict_plus),
+      geom_col(aes(x = bar_shifted, fill = deception_plus),
                width = 0.62, show.legend = FALSE) +
       # League-average reference line
       geom_vline(xintercept = avg_shifted, linetype = "dashed",
@@ -1672,7 +1672,7 @@ create_social_media_graphics <- function(res,
       labs(
         title    = title,
         subtitle = subtitle,
-        x        = "Predict+  (100 = league average)",
+        x        = "Deception+  (100 = league average)",
         y        = NULL,
         caption  = caption
       ) +
@@ -1691,24 +1691,24 @@ create_social_media_graphics <- function(res,
 
     # Starters - Least Predictable
     if (nrow(starters) > 0) {
-      top_starters <- starters %>% arrange(desc(predict_plus)) %>% head(top_n)
+      top_starters <- starters %>% arrange(desc(deception_plus)) %>% head(top_n)
       plots$starters_unpredictable <- create_graphic(
         top_starters,
         title = "Least Predictable Starters",
         subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
-        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#4361ee", fill_high = "#7209b7",
         filename = sprintf("social_starters_top%d_unpredictable_%s.png", top_n, date_short),
         reorder_desc = TRUE
       )
 
       # Starters - Most Predictable
-      bottom_starters <- starters %>% arrange(predict_plus) %>% head(top_n)
+      bottom_starters <- starters %>% arrange(deception_plus) %>% head(top_n)
       plots$starters_predictable <- create_graphic(
         bottom_starters,
         title = "Most Predictable Starters",
         subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
-        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e63946", fill_high = "#f4a261",
         filename = sprintf("social_starters_top%d_predictable_%s.png", top_n, date_short),
         reorder_desc = FALSE
@@ -1717,24 +1717,24 @@ create_social_media_graphics <- function(res,
 
     # Relievers - Least Predictable
     if (nrow(relievers) > 0) {
-      top_relievers <- relievers %>% arrange(desc(predict_plus)) %>% head(top_n)
+      top_relievers <- relievers %>% arrange(desc(deception_plus)) %>% head(top_n)
       plots$relievers_unpredictable <- create_graphic(
         top_relievers,
         title = "Least Predictable Relievers",
         subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
-        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+        caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#2a9d8f", fill_high = "#264653",
         filename = sprintf("social_relievers_top%d_unpredictable_%s.png", top_n, date_short),
         reorder_desc = TRUE
       )
 
       # Relievers - Most Predictable
-      bottom_relievers <- relievers %>% arrange(predict_plus) %>% head(top_n)
+      bottom_relievers <- relievers %>% arrange(deception_plus) %>% head(top_n)
       plots$relievers_predictable <- create_graphic(
         bottom_relievers,
         title = "Most Predictable Relievers",
         subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
-        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+        caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e76f51", fill_high = "#f4a261",
         filename = sprintf("social_relievers_top%d_predictable_%s.png", top_n, date_short),
         reorder_desc = FALSE
@@ -1745,23 +1745,23 @@ create_social_media_graphics <- function(res,
     message("Created ", n_graphics, " social media graphics (starters/relievers) in ", output_dir)
   } else {
     # Fallback: No role column, create overall graphics
-    top_unpred <- qualified %>% arrange(desc(predict_plus)) %>% head(top_n)
+    top_unpred <- qualified %>% arrange(desc(deception_plus)) %>% head(top_n)
     plots$top_unpredictable <- create_graphic(
       top_unpred,
       title = "Least Predictable Pitchers",
       subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
-      caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+      caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#4361ee", fill_high = "#7209b7",
       filename = sprintf("social_top%d_unpredictable_%s.png", top_n, date_short),
       reorder_desc = TRUE
     )
 
-    top_pred <- qualified %>% arrange(predict_plus) %>% head(top_n)
+    top_pred <- qualified %>% arrange(deception_plus) %>% head(top_n)
     plots$top_predictable <- create_graphic(
       top_pred,
       title = "Most Predictable Pitchers",
       subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
-      caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @PredictPlus  \u00b7  data: Baseball Savant"),
+      caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#e63946", fill_high = "#f4a261",
       filename = sprintf("social_top%d_predictable_%s.png", top_n, date_short),
       reorder_desc = FALSE

@@ -1,10 +1,10 @@
 # ============================================================================
-# compute_baseline.R — Compute Fixed Baseline Parameters for Predict+
+# compute_baseline.R — Compute Fixed Baseline Parameters for Deception+
 # ----------------------------------------------------------------------------
 # Runs N random 50/50 splits on historical data (2023-2025) using per-pitcher
 # models to establish stable standardization parameters (μ and σ).
 #
-# This creates a fixed reference point for Predict+ that:
+# This creates a fixed reference point for Deception+ that:
 #   - Defines what "100" means (average MLB pitcher unpredictability)
 #   - Is stable across all future runs
 #   - Should be recomputed periodically (e.g., annually)
@@ -85,7 +85,7 @@ compute_per_pitcher_unpredictability <- function(df_train,
 
 cat("\n")
 cat("============================================================\n")
-cat("  Predict+ Baseline Computation\n")
+cat("  Deception+ Baseline Computation\n")
 cat("============================================================\n")
 cat("Data Period:     ", BASELINE_START, "to", BASELINE_END, "\n")
 cat("Number of Runs:  ", N_RUNS, "\n")
@@ -220,7 +220,7 @@ message("Saved full results to: baseline_full_results.rds")
 
 cat("\n")
 cat("============================================================\n")
-cat("  Done! Use these values for Predict+ standardization:\n")
+cat("  Done! Use these values for Deception+ standardization:\n")
 cat("============================================================\n")
-cat("  Predict+ = 100 + 10 * ((ratio - ", round(baseline_mu, 4), ") / ", round(baseline_sd, 4), ")\n", sep = "")
+cat("  Deception+ = 100 + 10 * ((ratio - ", round(baseline_mu, 4), ") / ", round(baseline_sd, 4), ")\n", sep = "")
 cat("============================================================\n\n")

@@ -1,11 +1,11 @@
 # ============================================================================
-# run.R — Predict+ Training and Analysis Runner
+# run.R — Deception+ Training and Analysis Runner
 # ----------------------------------------------------------------------------
-# This script runs the Predict+ training workflow with configurable parameters.
+# This script runs the Deception+ training workflow with configurable parameters.
 # Train on one period, test on another (they can overlap or be identical).
 # ============================================================================
 
-# Source the main Predict+ functions
+# Source the main Deception+ functions
 source("pitch_ppi.R")
 
 # ============================================================================
@@ -108,7 +108,7 @@ OUT_CSV   <- "output/pitcher_ppi_mlb_2025.csv"
 
 cat("\n")
 cat("============================================================\n")
-cat("  Predict+ Training Pipeline\n")
+cat("  Deception+ Training Pipeline\n")
 cat("============================================================\n")
 cat("Split Method:    ", SPLIT_METHOD, "\n")
 if (SPLIT_METHOD == "temporal") {
@@ -172,30 +172,30 @@ cat("============================================================\n\n")
 # ============================================================================
 
 cat("============================================================\n")
-cat("  Top 10 Most Predictable Pitchers (Lowest Predict+)\n")
+cat("  Top 10 Most Predictable Pitchers (Lowest Deception+)\n")
 cat("============================================================\n")
 top_pred <- res$pitcher_ppi %>%
-  arrange(predict_plus) %>%
+  arrange(deception_plus) %>%
   head(10) %>%
   mutate(
     rank = row_number(),
     pitcher_name = str_trunc(pitcher_name, 25)
   ) %>%
-  select(rank, pitcher_name, n_pitches_test, predict_plus, ppi)
+  select(rank, pitcher_name, n_pitches_test, deception_plus, ppi)
 print(top_pred, n = 10)
 
 cat("\n")
 cat("============================================================\n")
-cat("  Top 10 Least Predictable Pitchers (Highest Predict+)\n")
+cat("  Top 10 Least Predictable Pitchers (Highest Deception+)\n")
 cat("============================================================\n")
 top_unpred <- res$pitcher_ppi %>%
-  arrange(desc(predict_plus)) %>%
+  arrange(desc(deception_plus)) %>%
   head(10) %>%
   mutate(
     rank = row_number(),
     pitcher_name = str_trunc(pitcher_name, 25)
   ) %>%
-  select(rank, pitcher_name, n_pitches_test, predict_plus, ppi)
+  select(rank, pitcher_name, n_pitches_test, deception_plus, ppi)
 print(top_unpred, n = 10)
 
 # ============================================================================

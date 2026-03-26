@@ -2,7 +2,7 @@
 # Compute Baseline Parameters
 # ============================================================================
 # One-time (or annual) workflow that runs compute_baseline.R to produce
-# baseline_params.rds — the fixed μ/σ used to scale Predict+ to 100±10.
+# baseline_params.rds — the fixed μ/σ used to scale Deception+ to 100±10.
 #
 # Without this file the daily workflow falls back to mu=1.0, sd=0.1 which
 # may not reflect actual unpredictability distributions in the data.
@@ -107,10 +107,10 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "feat: compute baseline parameters for Predict+ standardization
+            git commit -m "feat: compute baseline parameters for Deception+ standardization
 
             - Computed mu/sigma from 2023-2025 historical data (30 random splits)
-            - Enables proper Predict+ = 100 +/- 10 scaling in daily analysis
+            - Enables proper Deception+ = 100 +/- 10 scaling in daily analysis
             - Recompute annually with: Actions > Compute Baseline Parameters"
 
             git push

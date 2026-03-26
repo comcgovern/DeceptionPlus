@@ -1,4 +1,4 @@
-# ⚾ Predict+
+# ⚾ Deception+
 
 If you’re anything like me – which, if you’re looking at a GitHub repository for a new sabermetric model, I have to assume you are – then you have a particular tic that comes out when you're watching a baseball game. It probably happens so often and so automatically that you fail to register it, thinking it’s something everyone does, but I'm told that it's not.
 
@@ -6,13 +6,13 @@ I’m talking, of course, about guessing the next pitch that gets thrown. Whethe
 
 This sequence of events (and my temporary idleness in the wake of the October 2025 government shutdown that left me furloughed from my day job) led to an investigation of whether certain pitchers were more predictable in their selection in any given situation than others.
 
-**Predict+** is an R script that quantifies how unpredictable a pitcher's pitch selection is by comparing machine learning predictions against actual pitch choices. Higher scores indicate pitchers who successfully defy pattern recognition — even when sophisticated models know their history, tendencies, and game situation.
+**Deception+** is an R script that quantifies how unpredictable a pitcher's pitch selection is by comparing machine learning predictions against actual pitch choices. Higher scores indicate pitchers who successfully defy pattern recognition — even when sophisticated models know their history, tendencies, and game situation.
 
 ## What It Measures
 
 Traditional scouting tells us that unpredictability matters. Hitters and scouting departments study video, memorize tendencies, and look for patterns. But *how much* does unpredictability matter, and how do we measure it objectively?
 
-Predict+ uses an information-theoretic approach: we train a multinomial logistic regression model on each pitcher's historical data, including game context (count, outs, runners, batter handedness, previous pitch), and then measure how "surprised" the model is by the pitcher's actual choices. We compare this surprise against a baseline model to isolate genuine unpredictability from simple pitch mix diversity.
+Deception+ uses an information-theoretic approach: we train a multinomial logistic regression model on each pitcher's historical data, including game context (count, outs, runners, batter handedness, previous pitch), and then measure how "surprised" the model is by the pitcher's actual choices. We compare this surprise against a baseline model to isolate genuine unpredictability from simple pitch mix diversity.
 
 The metric is **scaled to 100 (league average) with a standard deviation of 10**:
 - **110 or higher: Highly unpredictable** — consistently defies pattern recognition
@@ -23,7 +23,7 @@ The metric is **scaled to 100 (league average) with a standard deviation of 10**
 
 ## Why It Matters
 
-Initial validation shows meaningful correlations with pitcher performance. Higher Predict+ for starters (1500+ pitches in a season) is associated with a lower xFIP and SIERA and a higher swinging strike rate and strikeout rate.
+Initial validation shows meaningful correlations with pitcher performance. Higher Deception+ for starters (1500+ pitches in a season) is associated with a lower xFIP and SIERA and a higher swinging strike rate and strikeout rate.
 
 This suggests there's strategic value in unpredictability, not just randomness, though there's also a lot of noise there. The effect exists even after controlling for pitch quality metrics.
 
@@ -31,7 +31,7 @@ Unpredictability appears to matter most when:
 - Facing the same batter multiple times (starters)
 - In high-leverage situations (relievers)
 
-![Predict+ vs SwStr%](https://gcdnb.pbrd.co/images/eXQQXoRih26i.png)
+![Deception+ vs SwStr%](https://gcdnb.pbrd.co/images/eXQQXoRih26i.png)
 
 ## Quick Start
 
@@ -119,7 +119,7 @@ Ratios > 1 mean the pitcher remains unpredictable even when accounting for game 
 
 ### 4. Standardization
 
-Following the Pitching+ standard, we convert the ratio to **Predict+** with mean = 100, SD = 10 for easy interpretation.
+Following the Pitching+ standard, we convert the ratio to **Deception+** with mean = 100, SD = 10 for easy interpretation.
 
 ## Features
 
@@ -142,7 +142,7 @@ The main output (`pitcher_ppi.csv`) includes:
 | `mean_surp_base` | Average surprise from baseline model |
 | `ppi` | Pitch Predictability Index (1 - ratio, range: -1 to 1) |
 | `unpredictability_ratio` | Model surprise / baseline surprise |
-| `predict_plus` | Scaled metric (mean=100, SD=10) |
+| `deception_plus` | Scaled metric (mean=100, SD=10) |
 
 ## Advanced Usage
 
@@ -193,7 +193,7 @@ Three baseline options available:
 
 ### Model Validation
 
-Higher Predict+ correlates with lower xFIP and higher swinging strike rate for starters.
+Higher Deception+ correlates with lower xFIP and higher swinging strike rate for starters.
 - **Effect size is sensible**: Unpredictability matters but isn't everything
 - **Direction is correct**: More unpredictable = better performance and more whiffs
 - **Role-specific**: Effect differs between starters and relievers (as expected)
@@ -225,10 +225,10 @@ Contributions welcome! Areas of particular interest:
 
 ## Citation
 
-If you use Predict+ in your research or analysis, please cite (APA):
+If you use Deception+ in your research or analysis, please cite (APA):
 
 ```
-McGovern, C. (2025). Predict+: Measuring MLB and AAA pitcher unpredictability in R through machine learning analysis of pitch selection (Version 1.0.0)
+McGovern, C. (2025). Deception+: Measuring MLB and AAA pitcher unpredictability in R through machine learning analysis of pitch selection (Version 1.0.0)
 [Computer software]. https://doi.org/10.5281/zenodo.17553074
 ```
 
