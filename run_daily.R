@@ -153,7 +153,7 @@ if (is.null(raw_test) || nrow(raw_test) == 0) {
 
 message("Test data: ", nrow(raw_test), " pitches")
 
-df_test <- engineer_features(raw_test)
+df_test <- engineer_features(raw_test, include_batter_metrics = FALSE)
 df_test <- df_test %>% dplyr::filter(!is.na(pitcher_id))
 
 message("Test features: ", nrow(df_test), " pitches from ",
@@ -177,26 +177,74 @@ history_end <- as.Date(TARGET_DATE) - 1      # Through yesterday
 # Try to load cached historical data, or download
 # For efficiency, we cache by year
 historical_data <- NULL
+current_year <- lubridate::year(history_end)
 
-for (year in seq(year(history_start), year(history_end))) {
+for (year in seq(lubridate::year(history_start), current_year)) {
   year_start <- max(as.Date(sprintf("%d-03-01", year)), history_start)
   year_end <- min(as.Date(sprintf("%d-11-30", year)), history_end)
 
   if (year_end < year_start) next
 
-  year_cachefile <- sprintf("cache/savant_raw_%s_%s_R_%s.Rds",
-                            year_start, year_end, LEVEL)
+  if (year == current_year) {
+    # Current (incomplete) season: use a stable filename and update incrementally.
+    # The date-range filename changes every day, so instead we cache by year and
+    # download only the delta since the last cached date.
+    year_cachefile <- sprintf("cache/savant_partial_%d_R_%s.Rds", year, LEVEL)
 
-  if (file.exists(year_cachefile)) {
-    message("  Loading cached ", year, " data...")
-    year_data <- readRDS(year_cachefile)
+    if (file.exists(year_cachefile)) {
+      message("  Loading cached partial ", year, " data...")
+      year_data <- readRDS(year_cachefile)
+
+      # Determine how stale the cache is and fetch only new pitches
+      cached_max_date <- tryCatch(
+        as.Date(max(as.character(year_data$game_date), na.rm = TRUE)),
+        error = function(e) as.Date(NA)
+      )
+
+      if (!is.na(cached_max_date) && cached_max_date < year_end) {
+        delta_start <- cached_max_date + 1
+        message("  Fetching new data: ", delta_start, " to ", year_end, "...")
+        new_data <- load_statcast_range(
+          as.character(delta_start), as.character(year_end),
+          game_type = "R", level = LEVEL, verbose = FALSE
+        )
+        if (!is.null(new_data) && nrow(new_data) > 0) {
+          year_data <- dplyr::bind_rows(year_data, new_data)
+          saveRDS(year_data, year_cachefile)
+          message("  Cache updated: added ", nrow(new_data), " pitches through ", year_end)
+        } else {
+          message("  No new pitches found since ", cached_max_date)
+        }
+      } else {
+        message("  Cache is current through ", year_end)
+      }
+    } else {
+      message("  Downloading partial ", year, " data (", year_start, " to ", year_end, ")...")
+      year_data <- load_statcast_range(
+        as.character(year_start), as.character(year_end),
+        game_type = "R", level = LEVEL, verbose = FALSE
+      )
+      if (!is.null(year_data) && nrow(year_data) > 0) {
+        saveRDS(year_data, year_cachefile)
+        message("  Cached to: ", year_cachefile)
+      }
+    }
   } else {
-    message("  Downloading ", year, " data...")
-    year_data <- load_statcast_range(as.character(year_start),
-                                      as.character(year_end),
-                                      game_type = "R", level = LEVEL, verbose = FALSE)
-    if (!is.null(year_data) && nrow(year_data) > 0) {
-      saveRDS(year_data, year_cachefile)
+    # Complete past season: filename is stable (end date never changes once season ends)
+    year_cachefile <- sprintf("cache/savant_raw_%s_%s_R_%s.Rds",
+                              year_start, year_end, LEVEL)
+
+    if (file.exists(year_cachefile)) {
+      message("  Loading cached ", year, " data...")
+      year_data <- readRDS(year_cachefile)
+    } else {
+      message("  Downloading ", year, " data...")
+      year_data <- load_statcast_range(as.character(year_start),
+                                        as.character(year_end),
+                                        game_type = "R", level = LEVEL, verbose = FALSE)
+      if (!is.null(year_data) && nrow(year_data) > 0) {
+        saveRDS(year_data, year_cachefile)
+      }
     }
   }
 
@@ -223,7 +271,7 @@ historical_data <- historical_data[!is.na(pitcher_id_col) & pitcher_id_col %in% 
 message("  Filtered to ", nrow(historical_data), " pitches for today's pitchers")
 
 # Engineer features on filtered historical data
-df_history_all <- engineer_features(historical_data)
+df_history_all <- engineer_features(historical_data, include_batter_metrics = FALSE)
 df_history_all <- df_history_all %>% dplyr::filter(!is.na(pitcher_id))
 
 # Get last N_HISTORY_PITCHES for each pitcher who appeared today

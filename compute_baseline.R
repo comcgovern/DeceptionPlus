@@ -116,7 +116,8 @@ if (file.exists(cachefile)) {
 }
 
 message("Engineering features...")
-df_all <- engineer_features(raw_data)
+batter_metric_cols <- c("o_swing_pct", "z_contact_pct", "swing_pct", "chase_contact_pct")
+df_all <- engineer_features(raw_data, include_batter_metrics = any(batter_metric_cols %in% FEATURE_NAMES))
 df_all <- df_all %>% filter(!is.na(pitcher_id))
 
 message("Total: ", nrow(df_all), " pitches from ",
