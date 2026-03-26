@@ -530,3 +530,63 @@ cat("  CSV:     ", OUT_CSV, "\n")
 cat("  Model:   ", OUT_MODEL, "\n")
 cat("  Visuals: ", viz_output, "/\n", sep = "")
 cat("============================================================\n\n")
+
+# ============================================================================
+# BALTIMORE ORIOLES PITCHER SUMMARY
+# ============================================================================
+
+if (LEVEL == "MLB") {
+  orioles_ppi <- NULL
+
+  if (all(c("home_team", "away_team", "inning_topbot") %in% names(df_test))) {
+    # Determine each pitcher's team from test data:
+    # TOP of inning → home team is pitching; BOT of inning → away team is pitching
+    pitcher_team_map <- df_test %>%
+      dplyr::mutate(
+        pitcher_team = dplyr::if_else(
+          stringr::str_to_upper(.data$inning_topbot) == "TOP",
+          as.character(.data$home_team),
+          as.character(.data$away_team)
+        )
+      ) %>%
+      dplyr::filter(!is.na(.data$pitcher_id), !is.na(.data$pitcher_team)) %>%
+      dplyr::distinct(.data$pitcher_id, .data$pitcher_team) %>%
+      dplyr::group_by(.data$pitcher_id) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup()
+
+    orioles_pitcher_ids <- pitcher_team_map %>%
+      dplyr::filter(.data$pitcher_team == "BAL") %>%
+      dplyr::pull(.data$pitcher_id)
+
+    if (length(orioles_pitcher_ids) > 0) {
+      orioles_ppi <- pitcher_ppi %>%
+        dplyr::filter(.data$pitcher_id %in% orioles_pitcher_ids,
+                      .data$n_pitches_test >= 10) %>%
+        dplyr::arrange(dplyr::desc(.data$predict_plus))
+    }
+  }
+
+  cat("============================================================\n")
+  cat("  Baltimore Orioles Pitchers (>= 10 pitches)\n")
+  cat("============================================================\n")
+
+  if (!is.null(orioles_ppi) && nrow(orioles_ppi) > 0) {
+    orioles_display <- orioles_ppi %>%
+      dplyr::select(
+        .data$pitcher_name, .data$role, .data$n_pitches_test,
+        .data$predict_plus, .data$status
+      )
+    print(as.data.frame(orioles_display), row.names = FALSE)
+
+    OUT_ORIOLES_CSV <- file.path(output_base, paste0("orioles_", target_day, ".csv"))
+    readr::write_csv(orioles_ppi, OUT_ORIOLES_CSV)
+    cat("\nOrioles CSV saved: ", OUT_ORIOLES_CSV, "\n")
+  } else if (!all(c("home_team", "away_team") %in% names(df_test))) {
+    cat("Team data not available in Statcast download.\n")
+  } else {
+    cat("No Orioles pitchers threw >= 10 pitches.\n")
+  }
+
+  cat("============================================================\n\n")
+}
