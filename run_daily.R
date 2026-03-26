@@ -153,7 +153,7 @@ if (is.null(raw_test) || nrow(raw_test) == 0) {
 
 message("Test data: ", nrow(raw_test), " pitches")
 
-df_test <- engineer_features(raw_test)
+df_test <- engineer_features(raw_test, include_batter_metrics = FALSE)
 df_test <- df_test %>% dplyr::filter(!is.na(pitcher_id))
 
 message("Test features: ", nrow(df_test), " pitches from ",
@@ -271,7 +271,7 @@ historical_data <- historical_data[!is.na(pitcher_id_col) & pitcher_id_col %in% 
 message("  Filtered to ", nrow(historical_data), " pitches for today's pitchers")
 
 # Engineer features on filtered historical data
-df_history_all <- engineer_features(historical_data)
+df_history_all <- engineer_features(historical_data, include_batter_metrics = FALSE)
 df_history_all <- df_history_all %>% dplyr::filter(!is.na(pitcher_id))
 
 # Get last N_HISTORY_PITCHES for each pitcher who appeared today

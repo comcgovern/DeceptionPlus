@@ -302,14 +302,18 @@ synthesize_pitch_type <- function(df) {
 add_last_pitch <- function(df) {
   if (!"at_bat_number" %in% names(df)) df$at_bat_number <- NA
   if (!"pitch_number" %in% names(df)) df$pitch_number <- NA
-  df %>% arrange(.data$game_pk, .data$at_bat_number, .data$pitch_number) %>%
-    group_by(.data$game_pk, .data$at_bat_number) %>%
+  # Group by pitcher within each game so that the last pitch of one PA carries
+  # into the first pitch of the next PA.  The old approach (grouping by at_bat_number)
+  # reset to "NONE" at every PA boundary, silencing sequence context for ~50% of pitches.
+  df %>%
+    arrange(.data$game_pk, .data$pitcher_id, .data$at_bat_number, .data$pitch_number) %>%
+    group_by(.data$game_pk, .data$pitcher_id) %>%
     mutate(last_pitch_type = dplyr::lag(.data$pitch_type)) %>%
     ungroup() %>%
-    mutate(last_pitch_type = if_else(is.na(.data$last_pitch_type) |
-                                       .data$last_pitch_type == "" |
-                                       .data$last_pitch_type == "NA",
-                                     "NONE", toupper(.data$last_pitch_type)))
+    mutate(last_pitch_type = if_else(
+      is.na(.data$last_pitch_type) | .data$last_pitch_type == "" | .data$last_pitch_type == "NA",
+      "NONE", toupper(.data$last_pitch_type)
+    ))
 }
 
 # ---------------------- Pitcher ID coalescer ---------------------------------
@@ -323,7 +327,7 @@ coalesce_pitcher_id <- function(df) {
 }
 
 # ---------------------- Feature engineering ----------------------------------
-engineer_features <- function(raw) {
+engineer_features <- function(raw, include_batter_metrics = TRUE) {
   if (is.null(raw) || nrow(raw) == 0) return(tibble())
   core <- c("game_date","game_pk","batter","pitch_type","balls","strikes",
             "outs_when_up","inning","inning_topbot","on_1b","on_2b","on_3b",
@@ -377,16 +381,25 @@ engineer_features <- function(raw) {
   }
   
   df <- add_last_pitch(df)
-  
-  bmet <- compute_batter_metrics(df)
-  df <- df %>% left_join(bmet, by = "batter") %>%
-    mutate(
-      o_swing_pct       = coalesce(.data$o_swing_pct, 0.5),
-      z_contact_pct     = coalesce(.data$z_contact_pct, 0.5),
-      swing_pct         = coalesce(.data$swing_pct, 0.5),
-      chase_contact_pct = coalesce(.data$chase_contact_pct, 0.5)
+
+  if (include_batter_metrics) {
+    bmet <- compute_batter_metrics(df)
+    df <- df %>% left_join(bmet, by = "batter") %>%
+      mutate(
+        o_swing_pct       = coalesce(.data$o_swing_pct, 0.5),
+        z_contact_pct     = coalesce(.data$z_contact_pct, 0.5),
+        swing_pct         = coalesce(.data$swing_pct, 0.5),
+        chase_contact_pct = coalesce(.data$chase_contact_pct, 0.5)
+      )
+  } else {
+    # Batter metrics not needed for per-pitcher models — skip the expensive
+    # group-by/join and fill with neutral defaults so downstream code doesn't break.
+    df <- df %>% mutate(
+      o_swing_pct = 0.5, z_contact_pct = 0.5,
+      swing_pct = 0.5, chase_contact_pct = 0.5
     )
-  
+  }
+
   df
 }
 
@@ -769,30 +782,32 @@ evaluate_per_pitcher <- function(df_history,
     ))
   }
 
-  if (verbose) message("Evaluating ", length(valid_pitchers), " pitchers with per-pitcher models...")
+  n_pitchers <- length(valid_pitchers)
+  if (verbose) message("Evaluating ", n_pitchers, " pitchers with per-pitcher models...")
 
   eps <- 1e-9
-  results <- vector("list", length(valid_pitchers))
 
-  for (i in seq_along(valid_pitchers)) {
-    pid <- valid_pitchers[i]
+  # Each pitcher's model is fully independent — parallelize across available cores.
+  # parallel::mclapply forks on Unix (GitHub Actions, Linux, macOS); falls back to
+  # lapply on Windows where forking is unavailable.
+  n_cores <- if (.Platform$OS.type == "unix") {
+    min(parallel::detectCores(logical = FALSE), n_pitchers)
+  } else {
+    1L
+  }
 
-    # Get this pitcher's data
+  eval_one_pitcher <- function(pid) {
     ptr_history <- df_history %>% filter(pitcher_id == pid)
-    ptr_test <- df_test %>% filter(pitcher_id == pid)
+    ptr_test    <- df_test    %>% filter(pitcher_id == pid)
 
-    # Prepare features for this pitcher's historical data
     pf_tr <- prepare_features(ptr_history, feature_names)
-    tr2 <- pf_tr$data
+    tr2   <- pf_tr$data
     feats <- pf_tr$features
 
-    # Align test data with training pitch class levels
     ptr_test <- ptr_test %>%
       mutate(pitch_class = factor(pitch_class, levels = levels(tr2$pitch_class)))
-
-    # Drop test rows with unseen pitch classes
     ptr_test <- ptr_test %>% filter(!is.na(pitch_class))
-    if (nrow(ptr_test) == 0) next
+    if (nrow(ptr_test) == 0) return(NULL)
 
     te2 <- ptr_test
     if (length(feats) > 0) {
@@ -802,57 +817,55 @@ evaluate_per_pitcher <- function(df_history,
           te2[[nm]] <- res$v
         }
       }
-      # Align test factor levels to training levels
       for (nm in feats) {
         if (is.factor(tr2[[nm]]) && nm %in% names(te2) && is.factor(te2[[nm]])) {
           te2[[nm]] <- factor(te2[[nm]], levels = levels(tr2[[nm]]))
         }
       }
-      # Drop rows with unseen factor levels (now NA)
       feat_complete <- complete.cases(te2[, intersect(feats, names(te2)), drop = FALSE])
       te2 <- te2[feat_complete, , drop = FALSE]
     }
-    if (nrow(te2) == 0) next
+    if (nrow(te2) == 0) return(NULL)
+    if (nlevels(droplevels(tr2$pitch_class)) < 2) return(NULL)
 
-    # Check we have enough pitch classes to fit model
-    if (nlevels(droplevels(tr2$pitch_class)) < 2) next
-
-    # Fit per-pitcher multinomial model
     form <- if (length(feats) == 0) as.formula("pitch_class ~ 1")
             else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
 
     mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200), silent = TRUE)
-    if (inherits(mod, "try-error")) next
+    if (inherits(mod, "try-error")) return(NULL)
 
     classes <- levels(tr2$pitch_class)
-
-    # Model predictions on test data
     P <- safe_predict_probs(mod, te2, classes)
 
     idx_true <- match(as.character(te2$pitch_class), classes)
-    if (any(is.na(idx_true))) next
+    if (any(is.na(idx_true))) return(NULL)
 
-    p_true <- P[cbind(seq_len(nrow(te2)), idx_true)]
+    p_true    <- P[cbind(seq_len(nrow(te2)), idx_true)]
     surp_model <- -log(pmax(p_true, eps))
 
     # Baseline: pitcher's own marginal pitch frequencies from history
-    # This represents "how surprising is this pitch given the pitcher's overall arsenal?"
     pitch_freqs <- table(tr2$pitch_class)
     pitch_probs <- (pitch_freqs + 1) / sum(pitch_freqs + 1)  # Add-1 smoothing
+    p_base      <- pitch_probs[as.character(te2$pitch_class)]
+    surp_base   <- -log(pmax(as.numeric(p_base), eps))
 
-    p_base <- pitch_probs[as.character(te2$pitch_class)]
-    surp_base <- -log(pmax(as.numeric(p_base), eps))
-
-    # Aggregate for this pitcher
-    results[[i]] <- tibble(
-      pitcher_id = pid,
-      n_history = nrow(ptr_history),
-      n_test = nrow(ptr_test),
-      mean_surp_model = mean(surp_model),
-      mean_surp_base = mean(surp_base),
+    tibble(
+      pitcher_id             = pid,
+      n_history              = nrow(ptr_history),
+      n_test                 = nrow(ptr_test),
+      mean_surp_model        = mean(surp_model),
+      mean_surp_base         = mean(surp_base),
       unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps)
     )
   }
+
+  raw_results <- if (n_cores > 1) {
+    parallel::mclapply(valid_pitchers, eval_one_pitcher, mc.cores = n_cores)
+  } else {
+    lapply(valid_pitchers, eval_one_pitcher)
+  }
+  # Filter out NULLs (skipped pitchers) and any try-error objects from failed workers
+  results <- Filter(function(x) !is.null(x) && !inherits(x, "try-error"), raw_results)
 
   result_df <- bind_rows(results)
 
