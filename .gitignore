@@ -1,0 +1,13 @@
+# R artifacts
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Statcast data cache files (large binary blobs; restored via GitHub Actions cache)
+# The daily workflow only downloads a 1-day delta once the partial-season cache exists.
+cache/savant_raw_*.Rds
+cache/savant_partial_*.Rds
+
+# Baseline full results (large; only baseline_params.rds needs to be committed)
+baseline_full_results.rds

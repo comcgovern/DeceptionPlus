@@ -157,7 +157,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: cache/
-          key: statcast-cache-${{ github.run_number }}
+          key: statcast-cache-${{ needs.check-games.outputs.date }}
           restore-keys: |
             statcast-cache-
 
@@ -208,7 +208,7 @@ jobs:
           DATE="${{ needs.check-games.outputs.date }}"
           LEVEL="${{ needs.check-games.outputs.level }}"
 
-          # Add output files
+          # Add output files and updated caches
           git add output/ cache/mlbam_name_cache.csv models/ || true
 
           # Check if there are changes to commit
