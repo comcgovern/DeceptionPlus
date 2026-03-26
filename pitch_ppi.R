@@ -57,18 +57,38 @@ load_statcast_range <- function(start_date, end_date, game_type = "R", level = "
       stop("Please install 'sabRmetrics': devtools::install_github('saberpowers/sabRmetrics')")
     }
     if (verbose) message("Downloading Savant (MLB): ", start_date, " -> ", end_date, " | game_type=", game_type)
-    df <- try(sabRmetrics::download_baseballsavant(
-      start_date = start_date,
-      end_date   = end_date,
-      game_type  = game_type,
-      cl         = NULL,
-      verbose    = verbose
-    ), silent = TRUE)
-    if (inherits(df, "try-error") || is.null(df) || nrow(df) == 0) {
+
+    # sabRmetrics::download_baseballsavant() does not support cross-year queries.
+    # Split into per-year chunks and combine.
+    start_d <- as.Date(start_date)
+    end_d   <- as.Date(end_date)
+    years   <- seq(as.integer(format(start_d, "%Y")), as.integer(format(end_d, "%Y")))
+
+    year_chunks <- lapply(years, function(yr) {
+      yr_start <- max(start_d, as.Date(sprintf("%d-01-01", yr)))
+      yr_end   <- min(end_d,   as.Date(sprintf("%d-12-31", yr)))
+      if (verbose) message("  Fetching year ", yr, ": ", yr_start, " -> ", yr_end)
+      chunk <- try(sabRmetrics::download_baseballsavant(
+        start_date = as.character(yr_start),
+        end_date   = as.character(yr_end),
+        game_type  = game_type,
+        cl         = NULL,
+        verbose    = verbose
+      ), silent = TRUE)
+      if (inherits(chunk, "try-error") || is.null(chunk) || nrow(chunk) == 0) {
+        if (verbose) message("    No data for ", yr)
+        return(NULL)
+      }
+      tibble::as_tibble(chunk)
+    })
+
+    year_chunks <- Filter(Negate(is.null), year_chunks)
+
+    if (length(year_chunks) == 0) {
       warning("No Savant rows returned for this window.")
       return(tibble())
     }
-    return(tibble::as_tibble(df))
+    return(dplyr::bind_rows(year_chunks))
   }
   
   # For AAA, use minors endpoint with sabRmetrics-style chunking
