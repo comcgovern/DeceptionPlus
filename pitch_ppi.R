@@ -935,11 +935,16 @@ load_baseline_params <- function(baseline_file = "baseline_params.rds") {
 #' @param df Data frame with pitch data (must have game_pk, pitcher_id, inning_topbot, at_bat_number)
 #' @return Data frame with pitcher_id, game_pk, and role (starter/reliever)
 identify_starter_reliever <- function(df) {
-  # For each game + team side (top/bottom), find the pitcher who threw the first pitch
-  # The pitcher with the minimum at_bat_number in inning 1 is the starter
+  # A pitcher is classified as a starter if they:
+  # (a) threw the first pitch of the game (inning 1) for their team, OR
+  # (b) threw more than 50 pitches in the game
 
-  # First, identify starters: the pitcher who pitched first for each team in each game
-  starters <- df %>%
+  # Count pitches per pitcher per game
+  pitch_counts <- df %>%
+    dplyr::count(game_pk, pitcher_id, name = "n_game_pitches")
+
+  # Condition (a): pitcher who threw first in inning 1 for each team side
+  starters_by_order <- df %>%
     dplyr::filter(inning == 1) %>%
     dplyr::group_by(game_pk, inning_topbot) %>%
     dplyr::arrange(at_bat_number) %>%
@@ -947,19 +952,20 @@ identify_starter_reliever <- function(df) {
     dplyr::ungroup() %>%
     dplyr::select(game_pk, pitcher_id) %>%
     dplyr::distinct() %>%
-    dplyr::mutate(is_starter = TRUE)
-
+    dplyr::mutate(is_starter_by_order = TRUE)
 
   # Get all pitcher-game combinations
   all_appearances <- df %>%
     dplyr::select(game_pk, pitcher_id) %>%
     dplyr::distinct()
 
-  # Join and classify
+  # Classify: starter if opened inning 1 OR threw > 50 pitches in game
   pitcher_roles <- all_appearances %>%
-    dplyr::left_join(starters, by = c("game_pk", "pitcher_id")) %>%
+    dplyr::left_join(starters_by_order, by = c("game_pk", "pitcher_id")) %>%
+    dplyr::left_join(pitch_counts, by = c("game_pk", "pitcher_id")) %>%
     dplyr::mutate(
-      is_starter = dplyr::coalesce(is_starter, FALSE),
+      is_starter_by_order = dplyr::coalesce(is_starter_by_order, FALSE),
+      is_starter = is_starter_by_order | (dplyr::coalesce(n_game_pitches, 0L) > 50L),
       role = dplyr::if_else(is_starter, "starter", "reliever")
     ) %>%
     dplyr::select(game_pk, pitcher_id, role)
@@ -1771,6 +1777,154 @@ create_social_media_graphics <- function(res,
   }
 
   invisible(plots)
+}
+
+#' Create Baltimore Orioles Deception+ graphic
+#'
+#' Generates a 1200xN px PNG bar chart for all Orioles pitchers who appeared
+#' on the given date, regardless of pitch count. Bars use an orange-to-black
+#' gradient (Orioles colors). Pitcher name labels include their pitch count.
+#'
+#' @param orioles_data Data frame of Orioles pitchers (subset of pitcher_ppi)
+#' @param game_date Character date string "YYYY-MM-DD"
+#' @param output_dir Directory for PNG output
+#' @return Invisible ggplot object
+create_orioles_graphic <- function(orioles_data, game_date,
+                                   output_dir = "output/visualizations") {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    warning("ggplot2 not available; skipping Orioles graphic")
+    return(invisible(NULL))
+  }
+
+  library(ggplot2)
+
+  # Font setup — mirrors create_social_media_graphics()
+  chart_font <- ""
+  if (requireNamespace("sysfonts", quietly = TRUE) &&
+      requireNamespace("showtext", quietly = TRUE)) {
+    tryCatch({
+      sysfonts::font_add_google("IBM Plex Sans", "ibm_plex_sans")
+      showtext::showtext_auto()
+      showtext::showtext_opts(dpi = 100)
+      chart_font <- "ibm_plex_sans"
+    }, error = function(e) {})
+  }
+
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  date_display <- format(as.Date(game_date), "%B %d, %Y")
+  date_short   <- format(as.Date(game_date), "%Y-%m-%d")
+
+  # Sort by deception+ descending (NAs last); embed pitch count in label
+  data <- orioles_data %>%
+    dplyr::arrange(dplyr::desc(dplyr::coalesce(deception_plus, -Inf))) %>%
+    dplyr::mutate(
+      name_label  = paste0(pitcher_name, " (", n_pitches_test, " pitches)"),
+      score_label = dplyr::if_else(
+        !is.na(deception_plus),
+        sprintf("%.0f", deception_plus),
+        "N/A"
+      )
+    )
+
+  # Factor levels: lowest score at bottom so ggplot puts highest at top
+  data$name_label <- factor(data$name_label, levels = rev(data$name_label))
+
+  # Use only evaluated pitchers to set axis bounds
+  evaluated <- data %>% dplyr::filter(!is.na(deception_plus))
+
+  if (nrow(evaluated) == 0) {
+    message("No evaluated Orioles pitchers to plot")
+    return(invisible(NULL))
+  }
+
+  x_left  <- floor(min(evaluated$deception_plus, 90)) - 4
+  x_track <- ceiling(max(evaluated$deception_plus, 110)) + 20
+
+  # Shift bars so the left edge of the chart is x_left in Deception+ units
+  data <- data %>%
+    dplyr::mutate(
+      bar_shifted = dplyr::if_else(
+        !is.na(deception_plus),
+        deception_plus - x_left,
+        0
+      )
+    )
+  track_shifted <- x_track - x_left
+  avg_shifted   <- 100 - x_left
+
+  raw_breaks  <- pretty(c(x_left, x_track), n = 5)
+  raw_breaks  <- raw_breaks[raw_breaks >= x_left & raw_breaks <= x_track]
+  plot_breaks <- raw_breaks - x_left
+
+  # Orioles brand colors: black (#000000) → orange (#DF4601)
+  # Higher deception+ → more orange; lower → closer to black
+  p <- ggplot(data, aes(y = name_label)) +
+    # Track (background) bars
+    geom_col(aes(x = track_shifted),
+             fill = "#e2e2e2", width = 0.62, show.legend = FALSE) +
+    # Data bars with Orioles gradient
+    geom_col(aes(x = bar_shifted, fill = bar_shifted),
+             width = 0.62, show.legend = FALSE) +
+    # League-average reference line
+    geom_vline(xintercept = avg_shifted, linetype = "dashed",
+               color = "#aaaaaa", linewidth = 0.9) +
+    annotate("text", x = avg_shifted, y = 0.42, label = "AVG",
+             size = 2.8, color = "#aaaaaa", hjust = 0.5) +
+    # Score labels
+    geom_text(aes(x = bar_shifted, label = score_label),
+              hjust = -0.32, size = 4.5, fontface = "bold", color = "#333333",
+              family = chart_font) +
+    scale_fill_gradient(low = "#000000", high = "#DF4601") +
+    scale_x_continuous(
+      expand = expansion(mult = c(0, 0.01)),
+      limits = c(0, track_shifted),
+      breaks = plot_breaks,
+      labels = as.integer(raw_breaks)
+    ) +
+    labs(
+      title    = "Baltimore Orioles \u2014 Deception+",
+      subtitle = paste0(date_display, "  \u00b7  all pitchers"),
+      x        = "Deception+  (100 = league average)",
+      y        = NULL,
+      caption  = paste0(
+        "Higher = less predictable  \u00b7  100 = league average",
+        "  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"
+      )
+    ) +
+    theme_minimal(base_size = 14, base_family = chart_font) +
+    theme(
+      plot.title      = element_text(face = "bold", size = 22, hjust = 0,
+                                     color = "#1a1a2e", margin = margin(b = 4),
+                                     family = chart_font),
+      plot.subtitle   = element_text(size = 12, hjust = 0, color = "#777777",
+                                     face = "plain", margin = margin(b = 14),
+                                     family = chart_font),
+      plot.caption    = element_text(size = 9, color = "#aaaaaa", hjust = 1,
+                                     face = "plain", margin = margin(t = 10),
+                                     family = chart_font),
+      panel.grid.major.x = element_line(color = "#e8e8e8", linewidth = 0.5),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor   = element_blank(),
+      axis.text.y     = element_text(size = 11, face = "bold", color = "#1a1a2e",
+                                     hjust = 1, family = chart_font),
+      axis.text.x     = element_text(size = 10, color = "#999999", face = "plain",
+                                     family = chart_font),
+      axis.title.x    = element_text(size = 10, color = "#888888", face = "plain",
+                                     margin = margin(t = 8), family = chart_font),
+      axis.title.y    = element_blank(),
+      plot.background  = element_rect(fill = "#ffffff", color = NA),
+      panel.background = element_rect(fill = "#f7f7f7", color = NA),
+      plot.margin = margin(24, 40, 16, 24)
+    )
+
+  filename <- sprintf("orioles_%s.png", date_short)
+  # Scale height with number of pitchers; 0.65" per row, min 6, max 14
+  n_rows <- nrow(data)
+  height <- min(max(6.0, 2.5 + n_rows * 0.65), 14)
+  ggsave(file.path(output_dir, filename), p, width = 12, height = height, dpi = 100)
+  message("Orioles graphic saved: ", file.path(output_dir, filename))
+  invisible(p)
 }
 
 # ---------------------- CLI --------------------------------------------------

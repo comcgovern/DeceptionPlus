@@ -560,18 +560,19 @@ if (LEVEL == "MLB") {
       dplyr::pull(.data$pitcher_id)
 
     if (length(orioles_pitcher_ids) > 0) {
+      # Include ALL Orioles pitchers regardless of pitch count
       orioles_ppi <- pitcher_ppi %>%
-        dplyr::filter(.data$pitcher_id %in% orioles_pitcher_ids,
-                      .data$n_pitches_test >= 10) %>%
+        dplyr::filter(.data$pitcher_id %in% orioles_pitcher_ids) %>%
         dplyr::arrange(dplyr::desc(.data$deception_plus))
     }
   }
 
   cat("============================================================\n")
-  cat("  Baltimore Orioles Pitchers (>= 10 pitches)\n")
+  cat("  Baltimore Orioles Pitchers (all pitchers)\n")
   cat("============================================================\n")
 
   if (!is.null(orioles_ppi) && nrow(orioles_ppi) > 0) {
+    # Print markdown-style table to console
     orioles_display <- orioles_ppi %>%
       dplyr::select(
         .data$pitcher_name, .data$role, .data$n_pitches_test,
@@ -579,13 +580,16 @@ if (LEVEL == "MLB") {
       )
     print(as.data.frame(orioles_display), row.names = FALSE)
 
-    OUT_ORIOLES_CSV <- file.path(output_base, paste0("orioles_", target_day, ".csv"))
-    readr::write_csv(orioles_ppi, OUT_ORIOLES_CSV)
-    cat("\nOrioles CSV saved: ", OUT_ORIOLES_CSV, "\n")
+    # Generate PNG graphic with orange/black gradient
+    create_orioles_graphic(
+      orioles_data = orioles_ppi,
+      game_date    = as.character(TARGET_DATE),
+      output_dir   = viz_output
+    )
   } else if (!all(c("home_team", "away_team") %in% names(df_test))) {
     cat("Team data not available in Statcast download.\n")
   } else {
-    cat("No Orioles pitchers threw >= 10 pitches.\n")
+    cat("No Orioles pitchers found in today's games.\n")
   }
 
   cat("============================================================\n\n")
