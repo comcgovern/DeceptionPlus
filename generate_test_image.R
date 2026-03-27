@@ -65,6 +65,25 @@ mock_relievers <- data.frame(
 
 mock_pitchers <- rbind(mock_starters, mock_relievers)
 
+# Mock Orioles pitchers — mix of starters, relievers, debuts, and short outings
+mock_orioles <- data.frame(
+  pitcher_id      = c(201, 202, 203, 204, 205, 206),
+  pitcher_name    = c(
+    "Corbin Burnes", "Kyle Bradish", "Felix Bautista",
+    "Yennier Cano", "Cole Irvin", "Jacob Webb"
+  ),
+  role            = c("starter", "starter", "reliever", "reliever", "reliever", "reliever"),
+  total_pitches   = c(1800, 1200, 700, 400, 300, 50),
+  n_pitches_test  = c(92, 78, 18, 22, 11, 4),
+  mean_surp_model = c(0.61, 0.55, 0.72, 0.48, 0.53, NA),
+  mean_surp_base  = c(0.58, 0.52, 0.60, 0.55, 0.51, NA),
+  ppi             = c(0.05, 0.06, 0.20, -0.13, 0.04, NA),
+  deception_plus  = c(118, 112, 125, 88, 102, NA),
+  status          = c("evaluated", "evaluated", "evaluated",
+                      "evaluated", "evaluated", "debut_no_history"),
+  stringsAsFactors = FALSE
+)
+
 # Wrap in the same structure create_social_media_graphics() expects
 mock_res <- list(pitcher_ppi = mock_pitchers)
 
@@ -77,10 +96,16 @@ if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 create_social_media_graphics(
   res                  = mock_res,
   game_date            = as.character(Sys.Date()),
-  min_pitches_starter  = 65,   # mock starters have 65–105 test pitches
-  min_pitches_reliever = 15,   # mock relievers have 15–35 test pitches
+  min_pitches_starter  = 50,   # starters: >= 50 pitches
+  min_pitches_reliever = 10,   # relievers: >= 10 pitches
   output_dir           = out_dir,
   top_n                = 5
+)
+
+create_orioles_graphic(
+  orioles_data = mock_orioles,
+  game_date    = as.character(Sys.Date()),
+  output_dir   = out_dir
 )
 
 cat("\nTest images written to:", normalizePath(out_dir), "\n")
