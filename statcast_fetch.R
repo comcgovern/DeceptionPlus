@@ -16,17 +16,20 @@
 #
 # Library use:
 #   source("statcast_fetch.R")
-#   data <- load_statcast_range("2024-08-01", "2024-08-15", level = "FCL")
+#   data <- load_statcast_range("2026-04-15", "2026-04-30", level = "FCL")
 #
 # CLI use:
-#   Rscript statcast_fetch.R --level FCL --start 2024-08-01 --end 2024-08-15 \
-#                            [--game-type R] [--out cache/fcl_2024.Rds] [--quiet]
+#   Rscript statcast_fetch.R --level FCL --start 2026-04-15 --end 2026-04-30 \
+#                            [--game-type R] [--out cache/fcl_2026.Rds] [--quiet]
 #
 #   Diagnostic ping (small window, prints row counts only):
-#   Rscript statcast_fetch.R --diagnose FCL [--start 2024-08-01 --end 2024-08-07]
+#   Rscript statcast_fetch.R --diagnose FCL [--start 2026-04-15 --end 2026-04-21]
 #
 #   List supported levels:
 #   Rscript statcast_fetch.R --list-levels
+#
+# Note: FCL Statcast coverage begins in 2026 — earlier dates will return 0 rows
+# even when the URL/parameters are correct.
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -322,8 +325,10 @@ load_statcast_range <- function(start_date, end_date, game_type = "R",
 
   if (is.null(data) || nrow(data) == 0) {
     message("RESULT: 0 rows returned. ",
-            if (cfg$key %in% c("FCL", "ACL")) {
-              "If FCL/ACL is empty, the API may not yet expose this complex league via the public minors endpoint - try --diagnose ROK to confirm any rookie data is available."
+            if (cfg$key == "FCL") {
+              "FCL Statcast coverage begins in 2026 - confirm the date window is in 2026 or later. If it is, try --diagnose ROK over the same window: if ROK returns rows but FCL does not, the public minors endpoint isn't honoring sport_id=16 and FCL pitches will need to be filtered post-hoc by team."
+            } else if (cfg$key == "ACL") {
+              "If ACL is empty, try --diagnose ROK to confirm any rookie data is exposed; if ROK returns rows but ACL does not, the public minors endpoint isn't honoring sport_id=17."
             } else "")
     return(invisible(1))
   }
