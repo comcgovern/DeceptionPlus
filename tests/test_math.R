@@ -209,6 +209,60 @@ cat("  ratio        : ", paste(sprintf("%.3f", r3$unpredictability_ratio), colla
 ok("equally unpredictable pitchers score alike regardless of arsenal size",
    diff(range(r3$unpredictability_ratio)) < 0.05)
 
+
+# ---------------------------------------------------------------------------
+# Two scales. Deception+ (ratio) is arsenal-neutral but needs a season;
+# Surprise+ (normalised surprise) survives a single outing.
+# ---------------------------------------------------------------------------
+cat("\n--- Surprise+ scale ---\n")
+ok("normed_surprise is reported and finite",
+   "normed_surprise" %in% names(r) && all(is.finite(r$normed_surprise)))
+# 102 is the 50/50 coin-flip pitcher: nothing to learn, so essentially all of
+# the arsenal's entropy should survive.
+ok("a coin-flip pitcher retains ~all of their arsenal's uncertainty",
+   abs(r$normed_surprise[r$pitcher_id == 102] - 1) < 0.15)
+# 101 is fully determined by the count; 103 throws one pitch 99% of the time.
+ok("a count-determined pitcher retains little of it",
+   r$normed_surprise[r$pitcher_id == 101] < 0.3)
+ok("a one-pitch reliever retains little of it",
+   r$normed_surprise[r$pitcher_id == 103] < 0.3)
+
+cat("\n--- Surprise+ is arsenal-neutral among pattern-free pitchers ---\n")
+# Same construction as the arsenal test above: equally unpredictable, 2-5 pitches.
+r3n <- r3$mean_surp_model / log(pmax(r3$n_classes, 2))
+cat("  arsenal size    : ", paste(r3$n_classes, collapse = "     "), "\n")
+cat("  raw surprise    : ", paste(sprintf("%.3f", r3$mean_surp_model), collapse = "  "), "\n")
+cat("  normed surprise : ", paste(sprintf("%.3f", r3n), collapse = "  "), "\n")
+ok("normalising removes most of the arsenal-size spread",
+   diff(range(r3n)) < diff(range(r3$mean_surp_model)) / 4)
+
+cat("\n--- reliability: which scale can carry a single outing? ---\n")
+# Score the same fixed pitchers over many independent short windows and compare
+# between-pitcher variance against window-to-window noise.
+rel_windows <- list()
+for (w in 1:14) {
+  tw <- do.call(rbind, lapply(c(101, 102, 103, 104), function(pid) {
+    rows <- which(test_df$pitcher_id == pid)
+    test_df[rows[((w - 1) * 20 + 1):(w * 20)], ]
+  }))
+  tw <- tw[!is.na(tw$pitcher_id), ]
+  rw <- evaluate_per_pitcher(hist_df, tw, min_train_pitches = 50,
+                             min_test_pitches = 5, verbose = FALSE)$results
+  if (nrow(rw)) rel_windows[[length(rel_windows) + 1]] <- rw
+}
+W <- bind_rows(rel_windows)
+reliab <- function(v) {
+  m <- W %>% group_by(pitcher_id) %>% summarise(mu = mean(.data[[v]]), .groups = "drop")
+  b <- var(m$mu)
+  wi <- mean((W[[v]] - m$mu[match(W$pitcher_id, m$pitcher_id)])^2)
+  b / (b + wi)
+}
+rel_s <- reliab("normed_surprise"); rel_d <- reliab("unpredictability_ratio")
+cat(sprintf("  Surprise+  reliability on 20-pitch windows: %.3f\n", rel_s))
+cat(sprintf("  Deception+ reliability on 20-pitch windows: %.3f\n", rel_d))
+ok("Surprise+ is the more reliable of the two on a single outing", rel_s > rel_d)
+ok("Surprise+ is usable at that window size", rel_s > 0.7)
+
 cat("\n", if (failures == 0L) "All tests passed.\n" else
     paste0(failures, " test(s) FAILED.\n"), sep = "")
 quit(status = if (failures == 0L) 0L else 1L)

@@ -119,12 +119,12 @@ ensure_directories()
 # before the probability-alignment fix encodes the old, inflated ratio scale
 # (μ ≈ 2.47, σ ≈ 2.35); standardising corrected ratios against it would push
 # every pitcher to roughly the same wrong number.
-BASELINE_METHOD_VERSION <- 2L
+BASELINE_METHOD_VERSION <- 3L
 
 if (!file.exists(BASELINE_FILE)) {
   warning("Baseline file not found: ", BASELINE_FILE)
   warning("Using fallback values. Run compute_baseline.R for stable baseline.")
-  baseline_params <- list(mu = 1.0, sd = 0.1)  # Fallback
+  baseline_params <- list(mu = 1.0, sd = 0.1, surprise_mu = 0.8, surprise_sd = 0.2)
 } else {
   message("Loading baseline parameters from: ", BASELINE_FILE)
   baseline_params <- load_baseline_params(BASELINE_FILE)
@@ -365,13 +365,32 @@ if (nrow(per_pitcher_results) == 0) {
 
 message("\nStandardizing to Deception+ scale...")
 
-# Calculate Deception+ using fixed baseline parameters
+# Two scales, two anchors. See "The two unpredictability scales" in pitch_ppi.R:
+#   Deception+  unpredictability beyond count and handedness. Arsenal-neutral, but
+#               a season-scale statistic — on a single outing it is mostly noise
+#               (reliability ~0.16 at 20 pitches), so it is reported but NOT used
+#               to rank the daily leaderboard.
+#   Surprise+   share of the pitcher's own maximum uncertainty that survives the
+#               situation. Reliability ~0.92 at 20 pitches, so this is what the
+#               daily rankings and graphics sort on.
+surprise_mu <- baseline_params$surprise_mu %||% NA_real_
+surprise_sd <- baseline_params$surprise_sd %||% NA_real_
+have_surprise_anchor <- is.finite(surprise_mu) && is.finite(surprise_sd) && surprise_sd > 0
+if (!have_surprise_anchor) {
+  warning("Baseline file carries no Surprise+ anchor; falling back to this day's ",
+          "own population, which makes Surprise+ comparable within the day but ",
+          "not across days. Re-run compute_baseline.R.")
+  surprise_mu <- mean(per_pitcher_results$normed_surprise, na.rm = TRUE)
+  surprise_sd <- sd(per_pitcher_results$normed_surprise, na.rm = TRUE)
+  if (!is.finite(surprise_sd) || surprise_sd <= 0) surprise_sd <- 1
+}
+
 per_pitcher_results <- per_pitcher_results %>%
   dplyr::mutate(
     ppi = 1 - (mean_surp_model / pmax(mean_surp_base, 1e-9)),
     ppi = pmin(pmax(ppi, -1), 1),
-    deception_plus = 100 + 10 * ((unpredictability_ratio - baseline_params$mu) /
-                                pmax(baseline_params$sd, 1e-9))
+    deception_plus = scale_plus(unpredictability_ratio, baseline_params$mu, baseline_params$sd),
+    surprise_plus  = scale_plus(normed_surprise, surprise_mu, surprise_sd)
   )
 
 # Identify starter/reliever roles from test data
@@ -408,9 +427,10 @@ evaluated_ppi <- per_pitcher_results %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     n_classes, mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, surp_excess, deception_plus, status
+    unpredictability_ratio, surp_excess, deception_plus,
+    normed_surprise, surprise_plus, status
   ) %>%
-  dplyr::arrange(dplyr::desc(deception_plus))
+  dplyr::arrange(dplyr::desc(surprise_plus))
 
 # Create excluded pitchers output (debuts, insufficient history)
 excluded_ppi <- excluded_pitchers %>%
@@ -429,17 +449,20 @@ excluded_ppi <- excluded_pitchers %>%
     unpredictability_ratio = NA_real_,
     surp_excess = NA_real_,
     deception_plus = NA_real_,
+    normed_surprise = NA_real_,
+    surprise_plus = NA_real_,
     role = dplyr::coalesce(role, "unknown")
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
     n_classes, mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, surp_excess, deception_plus, status
+    unpredictability_ratio, surp_excess, deception_plus,
+    normed_surprise, surprise_plus, status
   )
 
 # Combine evaluated and excluded pitchers
 pitcher_ppi <- dplyr::bind_rows(evaluated_ppi, excluded_ppi) %>%
-  dplyr::arrange(dplyr::desc(deception_plus), status)
+  dplyr::arrange(dplyr::desc(surprise_plus), status)
 
 # ============================================================================
 # SAVE RESULTS
@@ -516,8 +539,11 @@ if (n_short_outing > 0) {
   cat("Short Outings:     ", n_short_outing, " (<", MIN_TEST_PITCHES, " pitches today)\n", sep = "")
 }
 cat("Total Test Pitches:", sum(pitcher_ppi$n_pitches_test, na.rm = TRUE), "\n")
-cat("Baseline:          μ=", round(baseline_params$mu, 4),
+cat("Deception+ anchor: μ=", round(baseline_params$mu, 4),
     " σ=", round(baseline_params$sd, 4), "\n")
+cat("Surprise+ anchor:  μ=", round(surprise_mu, 4),
+    " σ=", round(surprise_sd, 4), "\n")
+cat("Rankings sort on Surprise+ (Deception+ needs a season's worth of pitches).\n")
 cat("\n")
 
 # Show top 5 and bottom 5 using role-specific thresholds (only evaluated pitchers)
@@ -531,27 +557,31 @@ qualified_relievers <- pitcher_ppi %>%
                 n_pitches_test >= MIN_PITCHES_RELIEVER_SOCIAL)
 
 # Helper function to print rankings
+# Rankings sort on Surprise+. Deception+ is shown alongside for context but is a
+# season-scale statistic — ordering a single day by it is ordering noise.
 print_rankings <- function(data, title_top, title_bottom, n = 5) {
   if (nrow(data) == 0) {
     cat("No pitchers qualified.\n")
     return()
   }
 
+  cols <- c("rank", "pitcher_name", "n_pitches_test", "surprise_plus", "deception_plus")
+
   cat(title_top, ":\n", sep = "")
   top_n <- data %>%
-    dplyr::arrange(dplyr::desc(deception_plus)) %>%
+    dplyr::arrange(dplyr::desc(surprise_plus)) %>%
     head(n) %>%
     dplyr::mutate(rank = dplyr::row_number()) %>%
-    dplyr::select(rank, pitcher_name, n_pitches_test, deception_plus)
-  print(as.data.frame(top_n), row.names = FALSE)
+    dplyr::select(dplyr::all_of(cols))
+  print(as.data.frame(top_n), row.names = FALSE, digits = 4)
 
   cat("\n", title_bottom, ":\n", sep = "")
   bottom_n <- data %>%
-    dplyr::arrange(deception_plus) %>%
+    dplyr::arrange(surprise_plus) %>%
     head(n) %>%
     dplyr::mutate(rank = dplyr::row_number()) %>%
-    dplyr::select(rank, pitcher_name, n_pitches_test, deception_plus)
-  print(as.data.frame(bottom_n), row.names = FALSE)
+    dplyr::select(dplyr::all_of(cols))
+  print(as.data.frame(bottom_n), row.names = FALSE, digits = 4)
 }
 
 # Starters
@@ -620,7 +650,7 @@ if (LEVEL == "MLB") {
       # Include ALL Orioles pitchers regardless of pitch count
       orioles_ppi <- pitcher_ppi %>%
         dplyr::filter(.data$pitcher_id %in% orioles_pitcher_ids) %>%
-        dplyr::arrange(dplyr::desc(.data$deception_plus))
+        dplyr::arrange(dplyr::desc(.data$surprise_plus))
     }
   }
 
@@ -633,7 +663,7 @@ if (LEVEL == "MLB") {
     orioles_display <- orioles_ppi %>%
       dplyr::select(
         .data$pitcher_name, .data$role, .data$n_pitches_test,
-        .data$deception_plus, .data$status
+        .data$surprise_plus, .data$deception_plus, .data$status
       )
     print(as.data.frame(orioles_display), row.names = FALSE)
 

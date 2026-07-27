@@ -14,10 +14,36 @@ Traditional scouting tells us that unpredictability matters. Hitters and scoutin
 
 Deception+ uses an information-theoretic approach: we train a multinomial logistic regression model on each pitcher's historical data, including game context (count, outs, runners, batter handedness, previous pitch), and then measure how "surprised" the model is by the pitcher's actual choices. We compare this surprise against a baseline model to isolate genuine unpredictability from simple pitch mix diversity.
 
-The metric is **scaled to 100 (league average) with a standard deviation of 10**:
-- **110 or higher: Highly unpredictable** — consistently defies pattern recognition
-- **100: League average** — predictable in typical ways  
-- **90 or lower: Highly predictable** — follows recognizable patterns
+### Two metrics, two questions
+
+There are two honest ways to ask "is this pitcher unpredictable," and they don't
+give the same answer. Both are reported, both scaled to **100 = league average,
+SD = 10**.
+
+| | **Surprise+** | **Deception+** |
+|---|---|---|
+| Asks | Of all the uncertainty this pitcher's arsenal *could* create, how much survives once you know the situation? | Does this pitcher defy prediction *beyond* what the count and handedness already give away? |
+| Built from | model surprise ÷ log(arsenal size) | model surprise ÷ baseline surprise |
+| 110+ | next pitch is near a coin flip among their offerings | breaks patterns a situational model can't learn |
+| 90− | the situation gives the pitch away | textbook, situation-driven selection |
+| Rewards big arsenals? | barely (R² ≈ 0.27 vs pitch-type count) | no (R² ≈ 0.03) |
+| **Usable on one outing?** | **yes** (reliability ≈ 0.92 at 20 pitches) | **no** (≈ 0.16 at 20 pitches; ≈ 0.79 at 1500) |
+
+The difference in that last row is the important one. Deception+ is the more
+conceptually pure measure — it is almost perfectly independent of how many pitches
+you throw, which is why a two-pitch reliever can top it. But it is a **season-scale
+statistic**: on a single 20-pitch outing roughly five-sixths of its spread is
+estimation noise, so ranking one day by it ranks noise.
+
+So: **daily leaderboards and graphics sort on Surprise+; Deception+ is the
+season-level number.** Both appear in every output file. Run
+`Rscript scripts/compare_metrics.R` to reproduce these figures, or
+`--real <season>` to check them against your own cached data.
+
+A note on what Deception+ deliberately *excludes*: because its baseline already
+knows the count, a pitcher whose only tell is count-based is scored as average —
+that predictability is controlled away rather than counted. Surprise+ has no such
+exclusion, which is part of why it reads more naturally.
 
 🧢 [**See the 2025 regular season data here!**](https://public.tableau.com/app/profile/mcgov36/viz/Predict2025/SingleDash)
 
@@ -172,13 +198,15 @@ The main output (`pitcher_ppi.csv`) includes:
 | `ppi` | Pitch Predictability Index (1 - ratio, range: -1 to 1) |
 | `unpredictability_ratio` | Model surprise / baseline surprise |
 | `surp_excess` | Model surprise **minus** baseline surprise, in nats. Same comparison as the ratio on a difference scale. Prefer it when the baseline surprise is small: for a pitcher who throws one pitch 99% of the time, both surprises are near zero and their *ratio* swings wildly on rounding-level differences, while the difference correctly reports "no meaningful gap." |
-| `deception_plus` | Scaled metric (mean=100, SD=10 over the evaluated population) |
+| `n_classes` | Size of that pitcher's pitch vocabulary |
+| `normed_surprise` | Model surprise ÷ log(`n_classes`) — the raw input to Surprise+. ~1.0 means the next pitch is close to a coin flip among their own offerings. |
+| `deception_plus` | **Deception+**: scaled `unpredictability_ratio` (mean=100, SD=10). Season-scale — see the two-metric table above. |
+| `surprise_plus` | **Surprise+**: scaled `normed_surprise` (mean=100, SD=10). Reliable on a single outing; this is what the daily rankings sort on. |
 
-The daily output additionally carries `n_classes` (the size of that pitcher's
-pitch vocabulary), `role`, and `status`. Rows with a `status` other than
-`evaluated` are pitchers who appeared but could not be scored — a debut with no
-history, too little history, or too few pitches on the day — and their metric
-columns are intentionally blank.
+The daily output additionally carries `role` and `status`. Rows with a `status`
+other than `evaluated` are pitchers who appeared but could not be scored — a debut
+with no history, too little history, or too few pitches on the day — and their
+metric columns are intentionally blank.
 
 ## Advanced Usage
 

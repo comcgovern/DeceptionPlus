@@ -251,6 +251,72 @@ The ratio isolates genuine unpredictability from:
 
 What remains is **situational independence** — pitchers who don't follow learnable patterns even when we account for context.
 
+## Two Scales: Deception+ and Surprise+
+
+The surprise-ratio construction above answers a specific question — *does context
+beyond count and handedness help predict this pitcher?* — and answers it well. It
+is almost perfectly independent of arsenal size (R² against pitch-type count ≈
+0.03), which is what allows a two-pitch reliever to rank above a five-pitch
+starter.
+
+What it cannot do is support a one-day ranking. Reliability — between-pitcher
+variance as a share of total variance, over repeated independent test windows —
+measures how much of an ordering is real:
+
+| test window | Surprise+ input | Deception+ input |
+|---|---|---|
+| 20 pitches (a typical outing) | 0.92 | **0.16** |
+| 100 pitches | 0.98 | 0.27 |
+| 1500 pitches (a season) | 1.00 | 0.79 |
+
+The ratio is a season-scale statistic. On a single outing roughly five-sixths of
+its spread is estimation noise: both numerator and denominator are means over ~20
+pitches, and dividing one noisy small number by another compounds the error rather
+than cancelling it.
+
+**Surprise+** measures the same underlying object without the division:
+
+```
+normed_surprise = mean_surp_model / log(n_classes)
+```
+
+Model surprise as a share of the most a given arsenal could deliver. ~1.0 means
+the next pitch is close to a coin flip among that pitcher's own offerings; 0.3
+means three-quarters of the uncertainty is gone once you know the situation.
+
+Normalising by `log(n_classes)` rather than reporting raw nats is what makes it
+comparable across arsenals. On synthetic pitchers who are equally unpredictable
+with 2, 3, 4 and 5 pitch types:
+
+```
+raw surprise    :  0.705  1.113  1.394  1.658    <- 2.4x spread, all arsenal size
+normed surprise :  1.018  1.013  1.006  1.030    <- flat
+```
+
+Raw model surprise is ~64% arsenal size by R²; normalised, ~27%.
+
+### Which to use
+
+- **Surprise+** for anything at outing or short-window scale — the daily
+  leaderboards, the social graphics, single-game analysis.
+- **Deception+** for season-scale work, where it reaches 0.79 reliability and is
+  the more interesting quantity: it isolates *pattern-breaking* from *arsenal
+  diversity* in a way Surprise+ does not.
+
+They are not redundant and they disagree. Across archetypes, Spearman between raw
+absolute surprise and the ratio is about −0.3 — they are close to unrelated. Report
+both.
+
+Note also what Deception+ deliberately excludes. Because its baseline conditions
+on the count, a pitcher whose only tell is count-based is scored average — that
+predictability is *controlled away*, not counted. Surprise+ makes no such
+exclusion, which is why a position player or a one-pitch reliever lands at the
+bottom of Surprise+ but mid-pack on Deception+.
+
+`surp_excess` (model minus baseline surprise, in nats) remains available as the
+difference-scale companion to the ratio; it is better behaved than the ratio where
+baseline surprise is near zero, but it is no more reliable on short windows.
+
 ## Standardization: Deception+
 
 Raw ratios are hard to interpret. We standardize to a scaled metric:
@@ -313,6 +379,10 @@ pipeline would — same history cap, same minimums, same one-day test window.
 random split sees no drift while a temporal split does. Measured, the effect on the
 ratio is under 0.004 — drift raises model and baseline surprise together and
 cancels. Training size is the variable that matters.)
+
+Surprise+ has its own anchor (`surprise_mu` / `surprise_sd`) in the same file,
+estimated from the same runs and trimmed the same way — it is a different scale
+and cannot share the ratio's μ/σ.
 
 **`baseline_params.rds` is versioned.** Any change to the scoring math invalidates
 previously saved μ/σ, and `run_daily.R` warns loudly rather than silently

@@ -242,6 +242,25 @@ if (!is.finite(baseline_sd) || baseline_sd <= 0) {
   stop("Baseline σ is not usable (", baseline_sd, "); check the input data.")
 }
 
+# Surprise+ rides on the same runs but has its own scale, so it needs its own
+# anchor. Trimmed the same way.
+surp_all <- all_results$normed_surprise
+surp_all <- surp_all[is.finite(surp_all)]
+if (length(surp_all) == 0) stop("No finite normalised surprise values to summarise")
+
+slim <- quantile(surp_all, c(TRIM, 1 - TRIM), na.rm = TRUE)
+surps <- surp_all[surp_all >= slim[1] & surp_all <= slim[2]]
+
+surprise_mu <- mean(surps)
+surprise_sd <- sd(surps)
+
+if (!is.finite(surprise_sd) || surprise_sd <= 0) {
+  stop("Surprise+ σ is not usable (", surprise_sd, "); check the input data.")
+}
+
+message(sprintf("  Normalised surprise: trimmed %d of %d outside [%.4f, %.4f]",
+                length(surp_all) - length(surps), length(surp_all), slim[1], slim[2]))
+
 # Sanity check: a healthy ratio distribution sits near 1 — the full model, which
 # strictly dominates the baseline in information, should not be routinely more
 # surprised than it.
@@ -263,8 +282,10 @@ cat("\n")
 cat("============================================================\n")
 cat("  Baseline Parameters Computed\n")
 cat("============================================================\n")
-cat("μ (mean):              ", round(baseline_mu, 6), "\n")
-cat("σ (std dev):           ", round(baseline_sd, 6), "\n")
+cat("Deception+  μ:         ", round(baseline_mu, 6), "\n")
+cat("Deception+  σ:         ", round(baseline_sd, 6), "\n")
+cat("Surprise+   μ:         ", round(surprise_mu, 6), "\n")
+cat("Surprise+   σ:         ", round(surprise_sd, 6), "\n")
 cat("Total observations:    ", n_observations, "\n")
 cat("Unique pitchers:       ", n_unique_pitchers, "\n")
 cat("Avg pitchers per run:  ", round(mean(observations_per_run$n), 1), "\n")
@@ -278,9 +299,14 @@ baseline_params <- list(
  # shifts every published score.
  #   2 — probability alignment / smoothing overhaul (surprise is now bounded and
  #       label-correct, so ratios centre near 1 instead of near 2.5)
- method_version = 2L,
+ #   3 — count nests the baseline; calibration mirrors production; Surprise+ added
+ method_version = 3L,
+ # Deception+ anchor (unpredictability ratio)
  mu = baseline_mu,
  sd = baseline_sd,
+ # Surprise+ anchor (normalised surprise) — a separate scale, separate anchor
+ surprise_mu = surprise_mu,
+ surprise_sd = surprise_sd,
  n_runs = N_RUNS,
  n_observations = n_observations,
  n_unique_pitchers = n_unique_pitchers,
@@ -309,4 +335,5 @@ cat("============================================================\n")
 cat("  Done! Use these values for Deception+ standardization:\n")
 cat("============================================================\n")
 cat("  Deception+ = 100 + 10 * ((ratio - ", round(baseline_mu, 4), ") / ", round(baseline_sd, 4), ")\n", sep = "")
+cat("  Surprise+  = 100 + 10 * ((normed_surprise - ", round(surprise_mu, 4), ") / ", round(surprise_sd, 4), ")\n", sep = "")
 cat("============================================================\n\n")

@@ -118,6 +118,45 @@ shrink_to_prior <- function(P, prior, lambda = 0.02) {
   P
 }
 
+# ---------------------- The two unpredictability scales ----------------------
+#
+# Deception+ and Surprise+ answer different questions and need different amounts
+# of data. Both are reported; neither replaces the other.
+#
+#   Deception+   standardises `unpredictability_ratio` = S_model / S_baseline.
+#                "Does this pitcher defy prediction BEYOND what the count and
+#                handedness already give away?" Almost perfectly independent of
+#                arsenal size (R² vs pitch-type count ≈ 0.03), which is what makes
+#                a two-pitch reliever able to top the board. But it is a
+#                season-scale statistic: reliability (between-pitcher variance
+#                over total variance) is ~0.16 on a 20-pitch outing, ~0.27 at 100
+#                pitches, ~0.79 at 1500. Do not rank a single day by it.
+#
+#   Surprise+    standardises normalised surprise = S_model / log(n_classes).
+#                "Of all the uncertainty this pitcher's arsenal could create, how
+#                much survives once you know the situation?" ~1.0 means their next
+#                pitch is close to a coin flip among their own offerings; 0.3 means
+#                three-quarters of the uncertainty is gone. Reliability ~0.92 on a
+#                20-pitch outing, so it can carry a daily leaderboard. Dividing by
+#                log(n_classes) rather than reporting raw nats is what keeps a
+#                two-pitch pitcher comparable to a five-pitch one; raw surprise is
+#                ~64% arsenal size, normalised surprise ~27%.
+#
+# Both are scaled to mean 100 / SD 10 over their reference population.
+
+# Normalised surprise: nats of surprise as a share of the most a given arsenal
+# could deliver. log(1) = 0, so a single-pitch pitcher would divide by zero —
+# floored at 2 classes, which reports them as near-zero surprise (correct: if
+# there is only one pitch, there is nothing to guess).
+normalized_surprise <- function(mean_surp_model, n_classes) {
+  mean_surp_model / log(pmax(n_classes, 2))
+}
+
+# 100 + 10 * z, guarding a degenerate or missing spread.
+scale_plus <- function(x, mu, sd) {
+  100 + 10 * ((x - mu) / pmax(sd, 1e-9))
+}
+
 # ---------------------- Directory Setup --------------------------------------
 ensure_directories <- function() {
   dirs <- c("cache", "models", "output", "output/visualizations")
@@ -959,7 +998,8 @@ evaluate_per_pitcher <- function(df_history,
         mean_surp_model = numeric(),
         mean_surp_base = numeric(),
         unpredictability_ratio = numeric(),
-        surp_excess = numeric()
+        surp_excess = numeric(),
+        normed_surprise = numeric()
       ),
       excluded = excluded
     ))
@@ -1070,7 +1110,9 @@ evaluate_per_pitcher <- function(df_history,
       # genuinely coin-flip pitcher at 1.0, purely from dividing noise by noise.
       # The difference does not have that failure mode and is the sounder basis
       # for any future respecification of Deception+.
-      surp_excess            = mean(surp_model) - mean(surp_base)
+      surp_excess            = mean(surp_model) - mean(surp_base),
+      # Surprise+ input: see "The two unpredictability scales" at the top.
+      normed_surprise        = normalized_surprise(mean(surp_model), length(classes))
     )
   }
 
@@ -1462,6 +1504,14 @@ train_ppi <- function(train_start, train_end,
   p_true_base_train <- P_base_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
   surp_base_train <- -log(pmax(p_true_base_train, eps))
 
+  # Each pitcher's own arsenal size, from the training window. Surprise+ divides
+  # by log of this, NOT by log of the league-wide class count — the seasonal model
+  # shares one class vocabulary across every pitcher, but "how much uncertainty
+  # could you possibly create" is a property of the pitches you actually throw.
+  arsenal_size <- tr2 %>%
+    group_by(pitcher_id) %>%
+    summarise(n_classes = n_distinct(as.character(pitch_class)), .groups = "drop")
+
   # Per-pitcher aggregation for training data (for standardization reference)
   per_pitcher_train <- tr2 %>%
     select(pitcher_id) %>%
@@ -1474,15 +1524,20 @@ train_ppi <- function(train_start, train_end,
       .groups = "drop"
     ) %>%
     filter(n_pitches_train >= min_total_pitches) %>%
-    mutate(unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9))
+    left_join(arsenal_size, by = "pitcher_id") %>%
+    mutate(unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9),
+           normed_surprise = normalized_surprise(mean_surp_model, n_classes))
 
   # Compute standardization parameters from TRAINING population
   # This establishes "league average" based on the training period
   train_u_mu <- mean(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
   train_u_sd <- sd(per_pitcher_train$unpredictability_ratio, na.rm = TRUE)
+  train_s_mu <- mean(per_pitcher_train$normed_surprise, na.rm = TRUE)
+  train_s_sd <- sd(per_pitcher_train$normed_surprise, na.rm = TRUE)
 
   if (verbose) {
-    message("   Training baseline: μ=", round(train_u_mu, 4), " σ=", round(train_u_sd, 4))
+    message("   Training baseline: ratio μ=", round(train_u_mu, 4), " σ=", round(train_u_sd, 4),
+            " | normed surprise μ=", round(train_s_mu, 4), " σ=", round(train_s_sd, 4))
     message("   Based on ", nrow(per_pitcher_train), " pitchers in training period")
   }
   
@@ -1500,12 +1555,14 @@ train_ppi <- function(train_start, train_end,
       .groups = "drop"
     ) %>%
     filter(n_pitches_test >= min_test_pitches) %>%
+    left_join(arsenal_size, by = "pitcher_id") %>%
     mutate(ppi = 1 - (mean_surp_model / pmax(mean_surp_base, 1e-9)),
            ppi = pmin(pmax(ppi, -1), 1),
            unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9),
            # See evaluate_per_pitcher(): difference-scale companion to the ratio,
            # stable where the baseline surprise is near zero.
-           surp_excess = mean_surp_model - mean_surp_base)
+           surp_excess = mean_surp_model - mean_surp_base,
+           normed_surprise = normalized_surprise(mean_surp_model, n_classes))
   
   # Total pitches across both periods (for reference)
   all_pitchers <- bind_rows(df_train, df_test) %>%
@@ -1537,27 +1594,34 @@ train_ppi <- function(train_start, train_end,
   #           fit from one training window, but optimistically biased (see 6b).
   test_u_mu <- mean(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
   test_u_sd <- sd(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
-  if (!is.finite(test_u_sd) || test_u_sd <= 0) {
+  test_s_mu <- mean(pitcher_ppi$normed_surprise, na.rm = TRUE)
+  test_s_sd <- sd(pitcher_ppi$normed_surprise, na.rm = TRUE)
+  if (!is.finite(test_u_sd) || test_u_sd <= 0 || !is.finite(test_s_sd) || test_s_sd <= 0) {
     warning("Test-population SD is not usable; falling back to the training anchor.")
     standardize <- "train"
   }
 
   anchor_mu <- if (standardize == "test") test_u_mu else train_u_mu
   anchor_sd <- if (standardize == "test") test_u_sd else train_u_sd
+  s_mu      <- if (standardize == "test") test_s_mu else train_s_mu
+  s_sd      <- if (standardize == "test") test_s_sd else train_s_sd
 
   if (verbose) {
-    message("   Standardising on the ", standardize, " population: μ=",
-            round(anchor_mu, 4), " σ=", round(anchor_sd, 4))
+    message("   Standardising on the ", standardize, " population:")
+    message("     Deception+ from ratio           μ=", round(anchor_mu, 4), " σ=", round(anchor_sd, 4))
+    message("     Surprise+  from normed surprise μ=", round(s_mu, 4), " σ=", round(s_sd, 4))
   }
 
   pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      deception_plus = 100 + 10 * ((unpredictability_ratio - anchor_mu) / pmax(anchor_sd, 1e-9))
+      deception_plus = scale_plus(unpredictability_ratio, anchor_mu, anchor_sd),
+      surprise_plus  = scale_plus(normed_surprise, s_mu, s_sd)
     ) %>%
     select(
-      pitcher_id, pitcher_name, total_pitches, n_pitches_test,
+      pitcher_id, pitcher_name, total_pitches, n_pitches_test, n_classes,
       mean_surp_model, mean_surp_base, ppi,
-      unpredictability_ratio, surp_excess, deception_plus
+      unpredictability_ratio, surp_excess, deception_plus,
+      normed_surprise, surprise_plus
     ) %>%
     arrange(desc(deception_plus))
   
@@ -1583,10 +1647,16 @@ train_ppi <- function(train_start, train_end,
          anchor = standardize,
          mu = anchor_mu,
          sd = anchor_sd,
+         surprise_mu = s_mu,
+         surprise_sd = s_sd,
          train_mean = train_u_mu,
          train_sd = train_u_sd,
          test_mean = test_u_mu,
          test_sd = test_u_sd,
+         train_surprise_mean = train_s_mu,
+         train_surprise_sd = train_s_sd,
+         test_surprise_mean = test_s_mu,
+         test_surprise_sd = test_s_sd,
          n_train_pitchers = nrow(per_pitcher_train)
        ))
 }
@@ -1752,12 +1822,18 @@ create_visualizations <- function(res, output_dir = "output/visualizations") {
 }
 
 # ---------------------- Social Media Visualizations ---------------------------
+#' @param score_col Which scale to plot: "surprise_plus" (default — reliable on a
+#'   single day) or "deception_plus" (a season-scale statistic; ranking one day by
+#'   it is mostly ranking noise). See "The two unpredictability scales".
+#' @param score_name Display name for that scale, used in the subtitle.
 create_social_media_graphics <- function(res,
                                           game_date,
                                           min_pitches_starter = 65,
                                           min_pitches_reliever = 15,
                                           output_dir = "output/visualizations",
-                                          top_n = 5) {
+                                          top_n = 5,
+                                          score_col = "surprise_plus",
+                                          score_name = "Surprise+") {
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
@@ -1787,6 +1863,19 @@ create_social_media_graphics <- function(res,
   all_pitchers <- res$pitcher_ppi
   if ("status" %in% names(all_pitchers)) {
     all_pitchers <- all_pitchers %>% filter(status == "evaluated")
+  }
+
+  # Everything below plots a column named `deception_plus`; point that at
+  # whichever scale was requested so the layout code stays in one place.
+  if (!score_col %in% names(all_pitchers)) {
+    warning("Column '", score_col, "' not found; falling back to deception_plus.")
+    score_col <- "deception_plus"; score_name <- "Deception+"
+  }
+  all_pitchers$deception_plus <- all_pitchers[[score_col]]
+  all_pitchers <- all_pitchers %>% filter(!is.na(deception_plus))
+  if (nrow(all_pitchers) == 0) {
+    warning("No pitchers with a usable ", score_name, " score")
+    return(invisible(NULL))
   }
 
   # Apply role-specific pitch thresholds
@@ -1941,7 +2030,7 @@ create_social_media_graphics <- function(res,
       plots$starters_unpredictable <- create_graphic(
         top_starters,
         title = "Least Predictable Starters",
-        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+        subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
         caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#4361ee", fill_high = "#7209b7",
         filename = sprintf("social_starters_top%d_unpredictable_%s.png", top_n, date_short),
@@ -1953,7 +2042,7 @@ create_social_media_graphics <- function(res,
       plots$starters_predictable <- create_graphic(
         bottom_starters,
         title = "Most Predictable Starters",
-        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+        subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
         caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e63946", fill_high = "#f4a261",
         filename = sprintf("social_starters_top%d_predictable_%s.png", top_n, date_short),
@@ -1967,7 +2056,7 @@ create_social_media_graphics <- function(res,
       plots$relievers_unpredictable <- create_graphic(
         top_relievers,
         title = "Least Predictable Relievers",
-        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
+        subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
         caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#2a9d8f", fill_high = "#264653",
         filename = sprintf("social_relievers_top%d_unpredictable_%s.png", top_n, date_short),
@@ -1979,7 +2068,7 @@ create_social_media_graphics <- function(res,
       plots$relievers_predictable <- create_graphic(
         bottom_relievers,
         title = "Most Predictable Relievers",
-        subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
+        subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_reliever, " pitches"),
         caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
         fill_low = "#e76f51", fill_high = "#f4a261",
         filename = sprintf("social_relievers_top%d_predictable_%s.png", top_n, date_short),
@@ -1995,7 +2084,7 @@ create_social_media_graphics <- function(res,
     plots$top_unpredictable <- create_graphic(
       top_unpred,
       title = "Least Predictable Pitchers",
-      subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+      subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
       caption = paste0("Higher = less predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#4361ee", fill_high = "#7209b7",
       filename = sprintf("social_top%d_unpredictable_%s.png", top_n, date_short),
@@ -2006,7 +2095,7 @@ create_social_media_graphics <- function(res,
     plots$top_predictable <- create_graphic(
       top_pred,
       title = "Most Predictable Pitchers",
-      subtitle = paste0(date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
+      subtitle = paste0(score_name, "  \u00b7  ", date_display, "  \u00b7  min ", min_pitches_starter, " pitches"),
       caption = paste0("Lower = more predictable  \u00b7  100 = league average  \u00b7  @DeceptionPlus  \u00b7  data: Baseball Savant"),
       fill_low = "#e63946", fill_high = "#f4a261",
       filename = sprintf("social_top%d_predictable_%s.png", top_n, date_short),
@@ -2028,15 +2117,27 @@ create_social_media_graphics <- function(res,
 #' @param orioles_data Data frame of Orioles pitchers (subset of pitcher_ppi)
 #' @param game_date Character date string "YYYY-MM-DD"
 #' @param output_dir Directory for PNG output
+#' @param score_col Which scale to plot; see create_social_media_graphics()
+#' @param score_name Display name for that scale
 #' @return Invisible ggplot object
 create_orioles_graphic <- function(orioles_data, game_date,
-                                   output_dir = "output/visualizations") {
+                                   output_dir = "output/visualizations",
+                                   score_col = "surprise_plus",
+                                   score_name = "Surprise+") {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     warning("ggplot2 not available; skipping Orioles graphic")
     return(invisible(NULL))
   }
 
   library(ggplot2)
+
+  # As in create_social_media_graphics(): alias the requested scale onto the
+  # column the layout code below expects.
+  if (!score_col %in% names(orioles_data)) {
+    warning("Column '", score_col, "' not found; falling back to deception_plus.")
+    score_col <- "deception_plus"; score_name <- "Deception+"
+  }
+  orioles_data$deception_plus <- orioles_data[[score_col]]
 
   # Font setup — mirrors create_social_media_graphics()
   chart_font <- ""
@@ -2123,9 +2224,9 @@ create_orioles_graphic <- function(orioles_data, game_date,
       labels = as.integer(raw_breaks)
     ) +
     labs(
-      title    = "Baltimore Orioles \u2014 Deception+",
+      title    = paste0("Baltimore Orioles \u2014 ", score_name),
       subtitle = paste0(date_display, "  \u00b7  all pitchers"),
-      x        = "Deception+  (100 = league average)",
+      x        = paste0(score_name, "  (100 = league average)"),
       y        = NULL,
       caption  = paste0(
         "Higher = less predictable  \u00b7  100 = league average",
