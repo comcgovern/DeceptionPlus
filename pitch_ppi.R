@@ -118,6 +118,16 @@ shrink_to_prior <- function(P, prior, lambda = 0.02) {
   P
 }
 
+# Scoring-method version. Bump whenever a change makes previously saved
+# baseline_params.rds μ/σ incomparable, so run_daily.R can refuse to publish
+# against a stale scale and the compute-baseline workflow knows to regenerate.
+#   1 — original
+#   2 — probability alignment / smoothing overhaul (surprise bounded and
+#       label-correct, so ratios centre near 1 instead of near 2.5)
+#   3 — count nests the baseline; calibration mirrors production; Surprise+ added
+#       (baseline_params.rds now needs surprise_mu / surprise_sd as well)
+BASELINE_METHOD_VERSION <- 3L
+
 # ---------------------- The two unpredictability scales ----------------------
 #
 # Deception+ and Surprise+ answer different questions and need different amounts

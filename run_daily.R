@@ -119,7 +119,7 @@ ensure_directories()
 # before the probability-alignment fix encodes the old, inflated ratio scale
 # (μ ≈ 2.47, σ ≈ 2.35); standardising corrected ratios against it would push
 # every pitcher to roughly the same wrong number.
-BASELINE_METHOD_VERSION <- 3L
+# BASELINE_METHOD_VERSION is defined once, in pitch_ppi.R.
 
 if (!file.exists(BASELINE_FILE)) {
   warning("Baseline file not found: ", BASELINE_FILE)

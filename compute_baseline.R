@@ -293,14 +293,10 @@ cat("============================================================\n\n")
 
 # Save baseline parameters
 baseline_params <- list(
- # Bumped whenever a change to the scoring math makes previously saved μ/σ
- # incomparable. run_daily.R refuses to trust a baseline stamped with an older
- # version, because standardising new ratios against an old scale silently
- # shifts every published score.
- #   2 — probability alignment / smoothing overhaul (surprise is now bounded and
- #       label-correct, so ratios centre near 1 instead of near 2.5)
- #   3 — count nests the baseline; calibration mirrors production; Surprise+ added
- method_version = 3L,
+ # Defined once, in pitch_ppi.R. run_daily.R refuses to trust a baseline stamped
+ # with an older version, because standardising new ratios against an old scale
+ # silently shifts every published score.
+ method_version = BASELINE_METHOD_VERSION,
  # Deception+ anchor (unpredictability ratio)
  mu = baseline_mu,
  sd = baseline_sd,
