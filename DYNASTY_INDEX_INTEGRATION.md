@@ -711,5 +711,5 @@ limitations; both are now modelled (`catcher`, `last_pitch_type_2`, `prev_descri
 
 ---
 
-*Source: [Deception+ on GitHub](https://github.com/comcgovern/PredictPlus) — Conor McGovern, 2025*
+*Source: [Deception+ on GitHub](https://github.com/comcgovern/DeceptionPlus) — Conor McGovern, 2025*
 *For commercial licensing inquiries: comcgovern@gmail.com*
