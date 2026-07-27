@@ -62,8 +62,7 @@ BASELINE_FILE <- get_arg("--baseline", "baseline_params.rds")
 
 # Features for per-pitcher models (simpler set for individual models)
 FEATURE_NAMES <- c(
-  "balls", "strikes", "two_strikes", "ahead_in_count",
-  "outs", "is_risp", "stand", "last_pitch_type"
+  "count", "outs", "is_risp", "stand", "last_pitch_type"
 )
 
 # ============================================================================
@@ -288,6 +287,29 @@ if (is.null(historical_data) || nrow(historical_data) == 0) {
   stop("No historical data available")
 }
 
+# Clamp to the history window before anything else touches this data.
+#
+# The current-season cache (savant_partial_<year>_R_<level>.Rds) is an
+# accumulating file with no dates in its name, and it was being bound in whole.
+# On a backfill — running an earlier date after the cache had advanced past it,
+# which is exactly how the out-of-order daily outputs in output/2026 were
+# produced — "history" therefore included the target day itself and every game
+# after it. The model then trained on the very pitches it was about to be scored
+# on, collapsing surprise toward zero and pinning those pitchers to the bottom of
+# the scale. It also quietly widened the intended 2-year lookback.
+hist_dates <- suppressWarnings(as.Date(as.character(historical_data$game_date)))
+in_window <- !is.na(hist_dates) & hist_dates >= history_start & hist_dates <= history_end
+n_dropped <- sum(!in_window)
+if (n_dropped > 0) {
+  message("  Dropped ", n_dropped, " cached pitches outside [",
+          history_start, ", ", history_end, "]")
+}
+historical_data <- historical_data[in_window, ]
+
+if (nrow(historical_data) == 0) {
+  stop("No historical data inside [", history_start, ", ", history_end, "]")
+}
+
 message("Total historical data: ", nrow(historical_data), " pitches")
 
 # Pre-filter historical data to only pitchers who appeared today before
@@ -316,7 +338,7 @@ message("  History data: ", nrow(df_history), " pitches from ",
 message("\nEvaluating per-pitcher unpredictability...")
 
 # Use the same baseline keys that were used to compute baseline_params (mu/sigma)
-BASELINE_KEYS <- baseline_params$baseline_keys %||% c("balls", "strikes", "stand", "two_strikes")
+BASELINE_KEYS <- baseline_params$baseline_keys %||% c("count", "stand")
 
 eval_result <- evaluate_per_pitcher(
   df_history = df_history,

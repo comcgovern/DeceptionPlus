@@ -137,6 +137,78 @@ d <- abs(r2$unpredictability_ratio[r2$pitcher_id == 102] -
 cat("  ratio shift when the test window halves:", round(d, 4), "\n")
 ok("halving the test window does not move the ratio much", d < 0.25)
 
+
+# ---------------------------------------------------------------------------
+# The comparison is only meaningful if the full model can reproduce the
+# baseline. Where it cannot, the ratio inverts: it rises with predictability.
+# ---------------------------------------------------------------------------
+cat("\n--- the full model must nest the baseline ---\n")
+
+# `dep` controls how strongly the pitch is a function of the COUNT — which is
+# exactly what the conditional baseline cells on.
+sim_count <- function(pid, n, K, dep, seed) {
+  make_pitcher(pid, n, c("FF","SL","CH","CU")[1:K], function(b, s) {
+    mix <- rep((1 - dep)/K, K); mix[1 + ((b * 3 + s) %% K)] <- (1 - dep)/K + dep; mix
+  }, seed)
+}
+ratios_for <- function(feats, bkeys) {
+  deps <- c(0, 0.25, 0.5, 0.75)
+  raw2 <- do.call(rbind, lapply(seq_along(deps),
+    function(i) sim_count(800 + i, 1500, 4, deps[i], 900 + i)))
+  d2 <- engineer_features(raw2, include_batter_metrics = FALSE)
+  d2 <- d2[!is.na(d2$pitcher_id), ]
+  rr <- suppressWarnings(evaluate_per_pitcher(
+    d2[d2$game_pk <= 30, ], d2[d2$game_pk > 30, ],
+    min_train_pitches = 50, min_test_pitches = 5,
+    feature_names = feats, baseline_keys = bkeys, verbose = FALSE)$results)
+  rr$unpredictability_ratio[order(rr$pitcher_id)]
+}
+# Numeric balls/strikes cannot express a saturated count cross-tab, so the
+# "sophisticated" model loses to the "simple" baseline as the pattern sharpens.
+old_r <- ratios_for(c("balls","strikes","two_strikes","ahead_in_count","outs",
+                      "is_risp","stand","last_pitch_type"),
+                    c("balls","strikes","stand","two_strikes"))
+new_r <- ratios_for(c("count","outs","is_risp","stand","last_pitch_type"),
+                    c("count","stand"))
+cat("  numeric balls/strikes: ", paste(sprintf("%.3f", old_r), collapse = "  "), "\n")
+cat("  joint `count` factor : ", paste(sprintf("%.3f", new_r), collapse = "  "), "\n")
+cat("  (pitchers ordered by increasing count-determinism)\n")
+ok("a stronger count pattern no longer inflates the score",
+   (max(new_r) - min(new_r)) < (max(old_r) - min(old_r)) / 2)
+ok("scores stay near 1 when the pattern is one the baseline also sees",
+   all(abs(new_r - 1) < 0.1))
+
+cat("\n--- the nesting guard warns on a non-nesting configuration ---\n")
+warn <- tryCatch({
+  check_baseline_nesting(df, c("balls","strikes","stand"), c("balls","strikes","stand"))
+  NULL
+}, warning = function(w) conditionMessage(w))
+ok("numeric baseline keys raise a warning",
+   !is.null(warn) && grepl("more expressive", warn))
+ok("the corrected configuration is silent",
+   is.null(tryCatch({
+     check_baseline_nesting(df, c("count","stand"), c("count","stand")); NULL
+   }, warning = function(w) conditionMessage(w))))
+
+# ---------------------------------------------------------------------------
+# The ratio is not invariant to how much data each model is fit on, so the
+# calibration in compute_baseline.R has to use production-sized histories.
+# ---------------------------------------------------------------------------
+cat("\n--- arsenal size must not drive the score ---\n")
+raw3 <- do.call(rbind, lapply(2:5, function(K)
+  make_pitcher(850 + K, 1400, c("FF","SL","CH","CU","SI")[1:K],
+               function(b, s) rep(1/K, K), 400 + K)))
+d3 <- engineer_features(raw3, include_batter_metrics = FALSE)
+d3 <- d3[!is.na(d3$pitcher_id), ]
+r3 <- evaluate_per_pitcher(d3[d3$game_pk <= 30, ], d3[d3$game_pk > 30, ],
+                           min_train_pitches = 50, min_test_pitches = 5,
+                           verbose = FALSE)$results
+cat("  arsenal size : ", paste(r3$n_classes, collapse = "     "), "\n")
+cat("  ratio        : ", paste(sprintf("%.3f", r3$unpredictability_ratio), collapse = "  "), "\n")
+# All four are equally (maximally) context-independent; any spread is bias.
+ok("equally unpredictable pitchers score alike regardless of arsenal size",
+   diff(range(r3$unpredictability_ratio)) < 0.05)
+
 cat("\n", if (failures == 0L) "All tests passed.\n" else
     paste0(failures, " test(s) FAILED.\n"), sep = "")
 quit(status = if (failures == 0L) 0L else 1L)

@@ -461,6 +461,23 @@ engineer_features <- function(raw, include_batter_metrics = TRUE) {
     strikes         = suppressWarnings(as.integer(coalesce(.data$strikes, 0))),
     two_strikes     = if_else(.data$strikes == 2L, 1L, 0L),
     ahead_in_count  = if_else(.data$strikes > .data$balls, 1L, 0L),
+    # Joint count state as a 12-level factor.
+    #
+    # `balls` and `strikes` as separate numeric terms force the model to be
+    # linear in the logit, and count effects are emphatically not linear — 3-0 is
+    # a fastball count, 0-2 is a breaking-ball count, and no monotone function of
+    # (balls, strikes) captures both. More importantly, the conditional baseline
+    # is a saturated cross-tab over count cells, so a linear-in-count model is
+    # STRICTLY LESS expressive than the baseline it is scored against. That made
+    # the ratio rise with predictability over most of its range. Modelling the
+    # count jointly makes the full model nest the baseline, which is what the
+    # comparison assumes.
+    count           = factor(paste0(pmin(pmax(.data$balls, 0L), 3L), "-",
+                                    pmin(pmax(.data$strikes, 0L), 2L)),
+                             levels = as.vector(t(outer(0:3, 0:2, paste, sep = "-")))),
+    # Ordinal with three values; a factor costs one extra dummy and drops the
+    # unwarranted "2 outs is twice 1 out" assumption.
+    outs            = factor(.data$outs, levels = c(0L, 1L, 2L)),
     # Factor, not numeric: the 0-7 code is a bit-mask of occupied bases, so
     # "runner on 3rd" (4) is not four times "runner on 1st" (1).  Treating it as
     # a continuous predictor — as the old code did — forced a nonsensical linear
@@ -526,19 +543,86 @@ na_safe_factor <- function(x) { x <- as.character(x); x[is.na(x) | x == ""] <- "
 na_safe_numeric <- function(x) { if (all(is.na(x))) return(rep(0, length(x))); m <- suppressWarnings(median(x, na.rm = TRUE)); x[is.na(x)] <- ifelse(is.finite(m), m, 0); as.numeric(x) }
 
 clean_one_feature <- function(vec) {
-  if (is.factor(vec) || is.character(vec)) { v <- na_safe_factor(vec); v <- droplevels(v); list(v = v, ok = nlevels(v) >= 2) }
-  else { v <- na_safe_numeric(vec); uniq <- unique(v); list(v = v, ok = length(uniq) >= 2) }
+  if (is.factor(vec) || is.character(vec)) { v <- na_safe_factor(vec); v <- droplevels(v); list(v = v, ok = nlevels(v) >= 2, fill = NA_real_) }
+  else {
+    m <- suppressWarnings(median(vec, na.rm = TRUE))
+    fill <- if (is.finite(m)) m else 0
+    v <- na_safe_numeric(vec); uniq <- unique(v)
+    list(v = v, ok = length(uniq) >= 2, fill = fill)
+  }
 }
 
 prepare_features <- function(df, feature_names) {
   present <- intersect(feature_names, names(df))
-  keep <- c(); out <- df
+  keep <- c(); out <- df; fills <- list()
   for (nm in present) {
     res <- clean_one_feature(out[[nm]])
     out[[nm]] <- res$v
+    fills[[nm]] <- res$fill
     if (res$ok) keep <- c(keep, nm)
   }
-  list(data = out, features = unique(keep))
+  list(data = out, features = unique(keep), fills = fills)
+}
+
+#' Put test features on exactly the training representation
+#'
+#' Factor levels come from training, and so do the values used to fill NAs.
+#' Re-deriving either from the test set is a train/test skew: imputing a missing
+#' score_diff with the median of the day being scored means the model is handed a
+#' value it was never fit against, and on a single-game test window that median can
+#' be far from the training one.
+align_features_to_train <- function(te, tr, feats, fills = NULL) {
+  for (nm in feats) {
+    if (!nm %in% names(te)) next
+    if (is.factor(tr[[nm]])) {
+      # na_safe_factor first so NA/"" map to "UNK" the same way they did in
+      # training; the relevel then keeps only levels the model actually saw.
+      te[[nm]] <- factor(as.character(na_safe_factor(te[[nm]])), levels = levels(tr[[nm]]))
+    } else {
+      v <- suppressWarnings(as.numeric(te[[nm]]))
+      fill <- if (!is.null(fills) && !is.null(fills[[nm]])) fills[[nm]] else 0
+      v[is.na(v)] <- fill
+      te[[nm]] <- v
+    }
+  }
+  te
+}
+
+#' Warn when the full model cannot represent what the baseline conditions on
+#'
+#' Deception+ reads a ratio above 1 as "the full model, despite knowing more, is
+#' still surprised — this pitcher is unpredictable." That reading is only valid if
+#' the full model *can* reproduce the baseline. The baseline is a saturated
+#' cross-tab over its keys, so a key it cells on must reach the model as a factor
+#' (or as something with at most two values, where linear and saturated coincide).
+#'
+#' When that fails, the comparison inverts: a pitcher with a strong pattern in a
+#' key the baseline cells on but the model can only approximate linearly scores as
+#' MORE unpredictable the more rigid their pattern is.
+check_baseline_nesting <- function(df, feature_names, baseline_keys) {
+  problems <- character(0)
+  for (k in baseline_keys) {
+    if (!k %in% names(df)) next
+    if (!k %in% feature_names) {
+      problems <- c(problems, sprintf(
+        "'%s' is a baseline key but not a model feature", k))
+      next
+    }
+    v <- df[[k]]
+    if (!is.factor(v) && !is.character(v) && length(unique(v[!is.na(v)])) > 2) {
+      problems <- c(problems, sprintf(
+        "'%s' cells the baseline but reaches the model as a numeric with %d levels",
+        k, length(unique(v[!is.na(v)]))))
+    }
+  }
+  if (length(problems) > 0) {
+    warning("The baseline is more expressive than the full model, so the ",
+            "unpredictability ratio may rise with predictability rather than fall:\n  - ",
+            paste(problems, collapse = "\n  - "),
+            "\nPrefer the joint `count` factor over numeric balls/strikes.",
+            call. = FALSE)
+  }
+  invisible(problems)
 }
 
 prune_baseline_keys <- function(df, baseline_keys) {
@@ -570,7 +654,7 @@ prune_baseline_keys <- function(df, baseline_keys) {
 #'   eight.  It penalised deep arsenals purely for being deep, and — because
 #'   Deception+ divides by baseline surprise — quietly lifted their scores.
 compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditional",
-                                   baseline_keys = c("balls","strikes","is_risp","stand","p_throws","two_strikes"),
+                                   baseline_keys = c("count","is_risp","stand","p_throws"),
                                    baseline_alpha = 5) {
   classes <- levels(tr_data$pitch_class)
 
@@ -789,13 +873,14 @@ evaluate_per_pitcher <- function(df_history,
                                   df_test,
                                   min_train_pitches = 100,
                                   min_test_pitches = 10,
-                                  feature_names = c("balls", "strikes", "two_strikes",
-                                                    "ahead_in_count", "outs", "is_risp",
+                                  feature_names = c("count", "outs", "is_risp",
                                                     "stand", "last_pitch_type"),
-                                  baseline_keys = c("balls", "strikes", "stand", "two_strikes"),
+                                  baseline_keys = c("count", "stand"),
                                   baseline_type = "conditional",
+                                  baseline_alpha = 5,
                                   decay = 0.01,
                                   prob_shrinkage = 0.02,
+                                  max_weights = 10000,
                                   verbose = TRUE) {
 
   # Prepare factor columns for history data
@@ -817,6 +902,8 @@ evaluate_per_pitcher <- function(df_history,
       p_throws = na_safe_factor(p_throws),
       last_pitch_type = na_safe_factor(last_pitch_type)
     )
+
+  check_baseline_nesting(df_test, feature_names, baseline_keys)
 
   # Get all pitchers in test data
   all_test_pitchers <- df_test %>%
@@ -929,17 +1016,7 @@ evaluate_per_pitcher <- function(df_history,
 
     te2 <- ptr_test
     if (length(feats) > 0) {
-      for (nm in feats) {
-        if (nm %in% names(te2)) {
-          res <- clean_one_feature(te2[[nm]])
-          te2[[nm]] <- res$v
-        }
-      }
-      for (nm in feats) {
-        if (is.factor(tr2[[nm]]) && nm %in% names(te2) && is.factor(te2[[nm]])) {
-          te2[[nm]] <- factor(te2[[nm]], levels = levels(tr2[[nm]]))
-        }
-      }
+      te2 <- align_features_to_train(te2, tr2, feats, pf_tr$fills)
       feat_complete <- complete.cases(te2[, intersect(feats, names(te2)), drop = FALSE])
       te2 <- te2[feat_complete, , drop = FALSE]
     }
@@ -949,7 +1026,8 @@ evaluate_per_pitcher <- function(df_history,
             else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
 
     mod <- try(suppressWarnings(
-      nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200, decay = decay)
+      nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200,
+                     decay = decay, MaxNWts = max_weights)
     ), silent = TRUE)
     if (inherits(mod, "try-error")) return(NULL)
 
@@ -971,7 +1049,8 @@ evaluate_per_pitcher <- function(df_history,
     # sit on the same probability floor.
     P_base <- compute_baseline_probs(tr2, te2,
                                       baseline_type = baseline_type,
-                                      baseline_keys = baseline_keys)
+                                      baseline_keys = baseline_keys,
+                                      baseline_alpha = baseline_alpha)
     P_base <- shrink_to_prior(P_base, prior, lambda = prob_shrinkage)
     p_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
     surp_base <- -log(pmax(as.numeric(p_base), eps))
@@ -1113,13 +1192,13 @@ train_ppi <- function(train_start, train_end,
                       test_start = NULL, test_end = NULL,
                       min_test_pitches = 10,
                       min_total_pitches = 50,
-                      feature_names = c("balls","strikes","two_strikes","ahead_in_count",
-                                        "is_top","outs","score_diff","base_state","is_risp",
+                      feature_names = c("count","is_top","outs","score_diff","base_state","is_risp",
                                         "high_leverage","times_through_order",
                                         "stand","p_throws","last_pitch_type",
                                         "o_swing_pct","z_contact_pct","swing_pct","chase_contact_pct"),
-                      baseline_keys = c("balls","strikes","is_risp","stand","p_throws","two_strikes"),
+                      baseline_keys = c("count","is_risp","stand","p_throws"),
                       baseline_type = "conditional",
+                      baseline_alpha = 5,
                       train_game_type = "R",
                       test_game_type = "R",
                       train_level = "MLB",
@@ -1129,6 +1208,7 @@ train_ppi <- function(train_start, train_end,
                       decay = 1e-4,
                       prob_shrinkage = 0.02,
                       standardize = c("test", "train"),
+                      max_weights = 10000,
                       verbose = TRUE) {
 
   standardize <- match.arg(standardize)
@@ -1283,20 +1363,24 @@ train_ppi <- function(train_start, train_end,
     stop("Training data has < 2 pitch classes; widen date range.")
   }
   
+  check_baseline_nesting(df_train, feature_names, baseline_keys)
+
   pf_tr <- prepare_features(df_train, feature_names)
   tr2   <- pf_tr$data
   feats <- pf_tr$features
-  
+
   form <- if (length(feats) == 0) as.formula("pitch_class ~ 1")
   else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
   
   if (verbose) message("Model formula: ", deparse(form))
   
-  mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500, decay = decay), silent = TRUE)
+  mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500,
+                            decay = decay, MaxNWts = max_weights), silent = TRUE)
   if (inherits(mod, "try-error")) {
     warning("Multinomial fit failed; retrying with intercept-only model.")
     form <- as.formula("pitch_class ~ 1")
-    mod  <- nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500, decay = decay)
+    mod  <- nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500,
+                           decay = decay, MaxNWts = max_weights)
     feats <- character(0)
   }
   
@@ -1315,20 +1399,10 @@ train_ppi <- function(train_start, train_end,
     last_pitch_type = na_safe_factor(last_pitch_type)
   )
   
+  # Put test features on the training representation: training factor levels and
+  # training NA-fill values (never test-set medians).
   te2 <- df_test
-  if (length(feats) > 0) {
-    for (nm in feats) {
-      res <- clean_one_feature(te2[[nm]])
-      te2[[nm]] <- res$v
-    }
-  }
-
-  # Align test factor levels to training levels (prevents predict errors from unseen levels)
-  for (nm in feats) {
-    if (is.factor(tr2[[nm]]) && is.factor(te2[[nm]])) {
-      te2[[nm]] <- factor(te2[[nm]], levels = levels(tr2[[nm]]))
-    }
-  }
+  if (length(feats) > 0) te2 <- align_features_to_train(te2, tr2, feats, pf_tr$fills)
 
   # Drop test rows with unseen pitch classes or unseen factor levels
   te2 <- te2 %>% dplyr::filter(!is.na(pitch_class))
@@ -1359,7 +1433,8 @@ train_ppi <- function(train_start, train_end,
   # ========== STEP 6: Baseline predictions and surprise ==========
   if (verbose) message("📐 Computing baseline...")
 
-  P_base <- compute_baseline_probs(tr2, te2, baseline_type = baseline_type, baseline_keys = baseline_keys)
+  P_base <- compute_baseline_probs(tr2, te2, baseline_type = baseline_type,
+                                   baseline_keys = baseline_keys, baseline_alpha = baseline_alpha)
   P_base <- shrink_to_prior(P_base, prior, lambda = prob_shrinkage)
   p_true_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
   surp_base   <- -log(pmax(p_true_base, eps))
@@ -1381,7 +1456,8 @@ train_ppi <- function(train_start, train_end,
   surp_model_train <- -log(pmax(p_true_train, eps))
 
   # Baseline for training data (in-sample)
-  P_base_train <- compute_baseline_probs(tr2, tr2, baseline_type = baseline_type, baseline_keys = baseline_keys)
+  P_base_train <- compute_baseline_probs(tr2, tr2, baseline_type = baseline_type,
+                                         baseline_keys = baseline_keys, baseline_alpha = baseline_alpha)
   P_base_train <- shrink_to_prior(P_base_train, prior, lambda = prob_shrinkage)
   p_true_base_train <- P_base_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
   surp_base_train <- -log(pmax(p_true_base_train, eps))
@@ -1520,13 +1596,13 @@ train_and_save <- function(train_start, train_end,
                            test_start = NULL, test_end = NULL,
                            min_test_pitches = 10,
                            min_total_pitches = 50,
-                           feature_names = c("balls","strikes","two_strikes","ahead_in_count",
-                                             "is_top","outs","score_diff","base_state","is_risp",
+                           feature_names = c("count","is_top","outs","score_diff","base_state","is_risp",
                                              "high_leverage","times_through_order",
                                              "stand","p_throws","last_pitch_type",
                                              "o_swing_pct","z_contact_pct","swing_pct","chase_contact_pct"),
-                           baseline_keys = c("balls","strikes","is_risp","stand","p_throws","two_strikes"),
+                           baseline_keys = c("count","is_risp","stand","p_throws"),
                            baseline_type = "conditional",
+                           baseline_alpha = 5,
                            train_game_type = "R",
                            test_game_type = "R",
                            train_level = "MLB",
@@ -1536,6 +1612,7 @@ train_and_save <- function(train_start, train_end,
                            decay = 1e-4,
                            prob_shrinkage = 0.02,
                            standardize = c("test", "train"),
+                           max_weights = 10000,
                            out_model = "models/ppi_model.rds",
                            out_ppi   = "output/pitcher_ppi.csv",
                            verbose   = TRUE) {
@@ -1549,6 +1626,7 @@ train_and_save <- function(train_start, train_end,
                    feature_names = feature_names,
                    baseline_keys = baseline_keys,
                    baseline_type = baseline_type,
+                   baseline_alpha = baseline_alpha,
                    train_game_type = train_game_type,
                    test_game_type = test_game_type,
                    train_level = train_level,
@@ -1558,6 +1636,7 @@ train_and_save <- function(train_start, train_end,
                    decay = decay,
                    prob_shrinkage = prob_shrinkage,
                    standardize = standardize,
+                   max_weights = max_weights,
                    verbose = verbose)
 
   saveRDS(list(
@@ -2104,8 +2183,8 @@ if (length(args) > 0 && any(args == "--train_start")) {
   min_total <- suppressWarnings(as.integer(get_arg("--min_total_pitches", "50")))
   out_model <- get_arg("--out_model", "models/ppi_model.rds")
   out_ppi   <- get_arg("--out_ppi", "output/pitcher_ppi.csv")
-  feat_str  <- get_arg("--features", "balls,strikes,two_strikes,ahead_in_count,is_top,outs,score_diff,base_state,is_risp,high_leverage,times_through_order,stand,p_throws,last_pitch_type,o_swing_pct,z_contact_pct,swing_pct,chase_contact_pct")
-  base_str  <- get_arg("--baseline_keys", "balls,strikes,is_risp,stand,p_throws,two_strikes")
+  feat_str  <- get_arg("--features", "count,is_top,outs,score_diff,base_state,is_risp,high_leverage,times_through_order,stand,p_throws,last_pitch_type,o_swing_pct,z_contact_pct,swing_pct,chase_contact_pct")
+  base_str  <- get_arg("--baseline_keys", "count,is_risp,stand,p_throws")
   baseline_type <- get_arg("--baseline_type", "conditional")
   train_game_type <- get_arg("--train_game_type", "R")
   test_game_type <- get_arg("--test_game_type", "R")

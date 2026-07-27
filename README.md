@@ -114,7 +114,8 @@ result <- train_and_save(
 ### 1. Model Training
 
 We train a multinomial logistic regression model to predict pitch type using:
-- **Count state**: balls, strikes, ahead/behind in count
+- **Count state**: the joint count as a 12-level factor (`0-0` … `3-2`), not two
+  numeric terms — 3-0 and 0-2 are not two steps along one axis
 - **Game situation**: inning, outs, runners on base, score differential
 - **Batter context**: handedness, chase rate, contact tendencies
 - **Sequence**: previous pitch thrown
@@ -131,6 +132,19 @@ We compare the full model's surprise against a simpler **baseline model** that u
 **Unpredictability Ratio** = Model Surprise / Baseline Surprise
 
 Ratios > 1 mean the pitcher remains unpredictable even when accounting for game context. Ratios < 1 mean situational patterns explain most pitch selection.
+
+For that reading to hold, the full model has to be able to reproduce the baseline —
+otherwise a ratio above 1 can just mean the full model is the weaker of the two.
+The baseline is a saturated cross-tab over count and handedness, so those must
+reach the full model as factors. See
+[METHODOLOGY.md](METHODOLOGY.md#the-model-must-nest-the-baseline).
+
+Note also what the baseline *removes*: because it already knows the count, a
+pitch pattern driven by the count is controlled away rather than counted as
+predictability. Deception+ measures unpredictability **beyond count and
+handedness**, not in absolute terms. A pitcher whose tells live in outs, base
+state, or sequencing moves the score sharply; one whose tells are purely
+count-based moves it much less.
 
 ### 4. Standardization
 
@@ -179,13 +193,26 @@ result <- train_and_save(
   train_end   = "2025-08-31",
   test_start  = "2025-09-01",
   test_end    = "2025-09-30",
-  feature_names = c("balls", "strikes", "two_strikes", "ahead_in_count",
-                    "high_leverage", "times_through_order", "outs",
+  feature_names = c("count", "high_leverage", "times_through_order", "outs",
                     "score_diff", "base_state", "is_risp",
                     "stand", "p_throws", "last_pitch_type",
                     "o_swing_pct", "z_contact_pct", "swing_pct"),
-  baseline_keys = c("balls", "strikes", "is_risp", "stand", "p_throws")
+  baseline_keys = c("count", "is_risp", "stand", "p_throws")
 )
+```
+
+`count` is the joint 12-level count factor (`0-0` … `3-2`). Prefer it over
+separate numeric `balls` and `strikes`: the conditional baseline is a saturated
+cross-tab over its keys, so a model that is merely *linear* in balls and strikes
+is less expressive than the baseline it is scored against, and the ratio then
+rises with predictability instead of falling. `check_baseline_nesting()` warns if
+your feature set and baseline keys fall into that trap.
+
+```r
+# This configuration warns — 'balls'/'strikes' cell the baseline but reach the
+# model as numerics, so the comparison is not apples to apples.
+train_and_save(..., feature_names = c("balls","strikes",...),
+                    baseline_keys = c("balls","strikes","stand"))
 ```
 
 ### Scoring Controls
@@ -198,6 +225,7 @@ sane; change them only if you know why.
 | `decay` | `1e-4` seasonal, `0.01` per-pitcher | Weight decay (L2 penalty) on the multinomial fit. Small per-pitcher samples separate easily; without a penalty the fit emits probabilities of 0 and 1 and `-log(p)` stops measuring surprise. |
 | `prob_shrinkage` | `0.02` | Prior mass mixed into predicted probabilities before `-log()`. Keeps model and baseline surprise on the same floor so their ratio stays meaningful. |
 | `standardize` | `"test"` | Population whose μ/σ anchor the Deception+ scale. `"test"` makes the output actually have mean 100 / SD 10. `"train"` gives a test-period-independent anchor but is measured in-sample and therefore optimistically biased. |
+| `baseline_alpha` | `5` | Pseudo-count mass smoothing the baseline's conditional cells toward the marginal pitch mix. It sits in the denominator of every score; picked by held-out likelihood the optimum is ~2 and the curve is flat from 1 to 5. |
 
 ### Command Line
 

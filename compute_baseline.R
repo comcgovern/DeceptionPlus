@@ -1,8 +1,14 @@
 # ============================================================================
 # compute_baseline.R — Compute Fixed Baseline Parameters for Deception+
 # ----------------------------------------------------------------------------
-# Runs N random 50/50 splits on historical data (2023-2025) using per-pitcher
-# models to establish stable standardization parameters (μ and σ).
+# Samples N game-days from the historical window (2023-2025) and scores each one
+# exactly the way run_daily.R does — per-pitcher models trained on that pitcher's
+# preceding N_HISTORY_PITCHES — to establish stable standardization parameters
+# (μ and σ).
+#
+# Mirroring the production setup is the point. The unpredictability ratio depends
+# on how much data each model is fit on and on how many pitches it is scored over,
+# so calibrating under a different regime puts the published scale off-centre.
 #
 # This creates a fixed reference point for Deception+ that:
 #   - Defines what "100" means (average MLB pitcher unpredictability)
@@ -12,7 +18,7 @@
 # Output: baseline_params.rds containing:
 #   - mu: mean unpredictability_ratio across all pitchers and runs
 #   - sd: standard deviation of unpredictability_ratio
-#   - n_runs: number of random splits performed
+#   - n_runs: number of game-days sampled
 #   - n_pitchers: total unique pitchers across all runs
 #   - date_computed: when baseline was computed
 #   - data_period: date range used for computation
@@ -28,23 +34,40 @@ source("pitch_ppi.R")
 BASELINE_START <- "2023-03-30"  # 2023 Opening Day
 BASELINE_END   <- "2025-09-28"  # End of 2025 regular season (adjust as needed)
 
-# Number of random splits to average
+# Number of sampled game-days to average over
 N_RUNS <- 30
 
-# Minimum pitches per pitcher to include in baseline
-MIN_PITCHES <- 100
+# These MUST mirror run_daily.R. The unpredictability ratio is not invariant to
+# how much data the per-pitcher model is fit on: a multinomial with more
+# parameters than it can support pays an out-of-sample overfitting penalty that
+# lands in the numerator, so the ratio falls as training data grows. Measured on
+# synthetic pitchers with identical true unpredictability:
+#
+#     training pitches   150     300     500    1000    3000
+#     ratio (2 pitches) 1.066   1.014   1.001   0.998   0.997
+#     ratio (4 pitches) 1.138   1.037   1.012   0.999   0.999
+#
+# The old calibration used a random 50/50 split of each pitcher's FULL 2023-2025
+# history — often thousands of training pitches, and a test window of similar
+# size — while production trains on at most 500 and scores a single day. mu was
+# therefore measured at the bottom of that curve and production sat above it,
+# inflating every score, most of all for short-history pitchers with deep
+# arsenals. Sampling actual game-days reproduces the production setup exactly,
+# including the test-window size that sets sigma.
+N_HISTORY_PITCHES   <- 500
+MIN_HISTORY_PITCHES <- 100
+MIN_TEST_PITCHES    <- 5
 
 # Output file
 OUTPUT_FILE <- "baseline_params.rds"
 
 # Features for per-pitcher models
 FEATURE_NAMES <- c(
- "balls", "strikes", "two_strikes", "ahead_in_count",
- "outs", "is_risp", "stand", "last_pitch_type"
+ "count", "outs", "is_risp", "stand", "last_pitch_type"
 )
 
 # Baseline keys for simple baseline comparison
-BASELINE_KEYS <- c("balls", "strikes", "stand", "two_strikes")
+BASELINE_KEYS <- c("count", "stand")
 
 # ============================================================================
 # PER-PITCHER MODEL FUNCTION
@@ -88,8 +111,10 @@ cat("============================================================\n")
 cat("  Deception+ Baseline Computation\n")
 cat("============================================================\n")
 cat("Data Period:     ", BASELINE_START, "to", BASELINE_END, "\n")
-cat("Number of Runs:  ", N_RUNS, "\n")
-cat("Min Pitches:     ", MIN_PITCHES, "\n")
+cat("Sampled Days:    ", N_RUNS, "\n")
+cat("History Cap:     ", N_HISTORY_PITCHES, " pitches\n")
+cat("Min History:     ", MIN_HISTORY_PITCHES, "\n")
+cat("Min Test:        ", MIN_TEST_PITCHES, "\n")
 cat("Output File:     ", OUTPUT_FILE, "\n")
 cat("============================================================\n\n")
 
@@ -125,42 +150,56 @@ df_all <- df_all %>% filter(!is.na(pitcher_id))
 message("Total: ", nrow(df_all), " pitches from ",
        length(unique(df_all$pitcher_id)), " pitchers\n")
 
-# Run N random splits
-message("Running ", N_RUNS, " random splits with per-pitcher models...\n")
+# Sample N game-days and score each one exactly the way run_daily.R would:
+# history = that pitcher's last N_HISTORY_PITCHES before the date, test = the date.
+df_all$game_day <- as.Date(df_all$game_date)
+all_days <- sort(unique(df_all$game_day))
+
+# Skip the opening stretch of the window — pitchers have no history to train on yet.
+eligible_days <- all_days[all_days >= (min(all_days) + 45)]
+if (length(eligible_days) < N_RUNS) {
+  stop("Only ", length(eligible_days), " eligible game-days for ", N_RUNS, " runs")
+}
+
+set.seed(20260101)
+sampled_days <- sort(sample(eligible_days, N_RUNS))
+
+message("Scoring ", N_RUNS, " sampled game-days with per-pitcher models...")
+message("  (history capped at ", N_HISTORY_PITCHES,
+        " pitches, matching run_daily.R)\n")
 
 all_ratios <- vector("list", N_RUNS)
 
 for (run in seq_len(N_RUNS)) {
- if (run %% 10 == 1 || run == N_RUNS) {
-   message(sprintf("Run %d/%d...", run, N_RUNS))
+ target_day <- sampled_days[run]
+ if (run %% 5 == 1 || run == N_RUNS) {
+   message(sprintf("Run %d/%d (%s)...", run, N_RUNS, target_day))
  }
 
- # Set seed for reproducibility
- set.seed(run)
+ df_test <- df_all %>% filter(game_day == target_day)
+ if (nrow(df_test) == 0) next
 
- # Random 50/50 split per pitcher
- df_split <- df_all %>%
-   group_by(pitcher_id) %>%
-   mutate(
-     random_order = sample(n()),
-     is_train = random_order <= ceiling(n() / 2)
-   ) %>%
-   ungroup()
+ day_pitchers <- unique(df_test$pitcher_id)
 
- df_train <- df_split %>% filter(is_train) %>% select(-random_order, -is_train)
- df_test <- df_split %>% filter(!is_train) %>% select(-random_order, -is_train)
+ # Strictly before the target day — no leakage from the day being scored.
+ df_history <- get_pitcher_history(
+   df_all %>% filter(game_day < target_day),
+   day_pitchers,
+   n_pitches = N_HISTORY_PITCHES
+ )
+ if (nrow(df_history) == 0) next
 
- # Compute per-pitcher unpredictability
  run_results <- compute_per_pitcher_unpredictability(
-   df_train, df_test,
-   min_train_pitches = MIN_PITCHES / 2,  # Half goes to train
-   min_test_pitches = MIN_PITCHES / 2,   # Half goes to test
+   df_history, df_test,
+   min_train_pitches = MIN_HISTORY_PITCHES,
+   min_test_pitches  = MIN_TEST_PITCHES,
    feature_names = FEATURE_NAMES,
    verbose = FALSE
  )
 
  if (nrow(run_results) > 0) {
    run_results$run <- run
+   run_results$game_day <- target_day
    all_ratios[[run]] <- run_results
  }
 }
@@ -248,7 +287,10 @@ baseline_params <- list(
  avg_pitchers_per_run = mean(observations_per_run$n),
  date_computed = Sys.time(),
  data_period = paste(BASELINE_START, "to", BASELINE_END),
- min_pitches = MIN_PITCHES,
+ n_history_pitches = N_HISTORY_PITCHES,
+ min_history_pitches = MIN_HISTORY_PITCHES,
+ min_test_pitches = MIN_TEST_PITCHES,
+ sampled_days = sampled_days,
  trim = TRIM,
  n_trimmed = n_trimmed,
  feature_names = FEATURE_NAMES,

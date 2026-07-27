@@ -83,7 +83,7 @@ BASELINE_TYPE <- "conditional"
 
 # Features to use in the multinomial model
 FEATURE_NAMES <- c(
-  "balls", "strikes", "two_strikes", "ahead_in_count",
+  "count",
   "is_top", "outs", "score_diff", 
   "base_state", "is_risp",
   "high_leverage",        # Late inning + close game
@@ -94,8 +94,8 @@ FEATURE_NAMES <- c(
 
 # Features to use for conditional baseline
 BASELINE_KEYS <- c(
-  "balls", "strikes",
-  "stand", "p_throws", "two_strikes"
+  "count",
+  "stand", "p_throws"
 )
 
 # Output paths (will be created if they don't exist)

@@ -77,9 +77,11 @@ Deception+ uses *conditional* surprise from an actual predictive model, then com
 A multinomial logistic regression predicting pitch type from:
 
 #### Game Context
-- `balls`, `strikes`: Current count
-- `two_strikes`: Binary indicator for 2-strike counts
-- `ahead_in_count`: Binary indicator for **pitcher**-favorable counts (`strikes > balls`)
+- `count`: The joint count state as a 12-level factor (`0-0` … `3-2`). Modeled
+  jointly, not as two numeric terms — see *The Model Must Nest the Baseline*.
+- `two_strikes`, `ahead_in_count`: retained as engineered columns, but redundant
+  once `count` is in the model (both are exact functions of it) and no longer in
+  the default feature set
 - `outs`: Current outs (0, 1, 2)
 - `inning`: Which inning (treated as categorical, not continuous)
 - `score_diff`: Home score - away score
@@ -157,6 +159,55 @@ Cells absent from the training window fall back to the marginal mix as well.
 (A uniform `1/K` fallback charges ~log K nats of baseline surprise for a context
 the baseline simply never encountered — arbitrary, and it deflates the ratio.)
 
+`baseline_alpha` sits directly in the denominator of every score, so over-smoothing
+the baseline would make the model look good for free. Chosen by held-out likelihood
+of the baseline on its own, the optimum is around 2 and the curve is flat from 1 to
+5 (α=5 costs 0.003 nats/pitch against the optimum) before degrading sharply past
+20. The default of 5 is inside the flat region; it is exposed as a parameter so the
+sensitivity can be re-checked on real data.
+
+### The Model Must Nest the Baseline
+
+Deception+ reads a ratio above 1 as *"the full model, despite knowing strictly
+more, is still surprised — this pitcher is unpredictable."* That inference is only
+valid if the full model can actually reproduce the baseline. Otherwise a ratio
+above 1 may just mean the full model is the weaker of the two.
+
+It was. The conditional baseline is a **saturated cross-tab** over its keys — it
+can represent any function of the count. The full model had `balls` and `strikes`
+as separate *numeric* terms, making it linear in the logit and unable to represent
+one. Count effects are famously non-monotone; asked to fit a 95% fastball rate on
+3-0 alongside 25% on 0-2, a linear-in-count model returns:
+
+| count | true | linear in balls+strikes | `count` factor |
+|-------|------|------------------------|----------------|
+| 3-0   | 0.95 | 0.77                   | 0.94           |
+| 0-2   | 0.25 | 0.29                   | 0.23           |
+| 1-2   | 0.25 | 0.36                   | 0.24           |
+
+So the "simple" baseline beat the "sophisticated" model on exactly the dimension
+the baseline conditions on, and the harder a pitcher leaned on count patterns the
+*more deceptive* the metric called them. On synthetic pitchers whose count-
+determinism rises left to right:
+
+```
+numeric balls/strikes:  0.988  1.031  1.231  1.299   <- rises with predictability
+joint `count` factor :  0.997  1.001  0.995  1.006   <- flat, as it should be
+```
+
+Hence the joint `count` factor on both sides. The general rule, enforced by
+`check_baseline_nesting()`, which warns when it is violated:
+
+> Every baseline key must reach the full model in a form at least as flexible as
+> the baseline's — as a factor, or as something with at most two values.
+
+Note what "flat" means here: when a pattern lives in something the baseline also
+sees, it is *controlled away* rather than counted as predictability. That is the
+point of having a baseline. Deception+ measures unpredictability **beyond count
+and handedness**, not in absolute terms. A pitcher whose pattern lives somewhere
+the baseline is blind to — outs, base state, sequencing — still moves the score
+sharply (ratio 1.00 → 0.01 across the same sweep).
+
 ### The Comparison
 
 For each pitch in the test period:
@@ -231,9 +282,37 @@ This gives us:
 
 The daily pipeline is different again: it standardizes against fixed μ/σ stored in
 `baseline_params.rds` by `compute_baseline.R`, so that scores are comparable from
-day to day. Those parameters are estimated from repeated random splits with the
-top and bottom 1% of ratios trimmed — μ and σ define the whole scale, so a handful
-of extreme values would otherwise drag it for everyone.
+day to day. Those parameters are estimated with the top and bottom 1% of ratios
+trimmed — μ and σ define the whole scale, so a handful of extreme values would
+otherwise drag it for everyone.
+
+**The calibration must run under the production regime.** The ratio is *not*
+invariant to how much data each per-pitcher model is fit on. More training data
+means less overfitting, which means lower model surprise in the numerator:
+
+| training pitches | 150 | 300 | 500 | 1000 | 3000 |
+|---|---|---|---|---|---|
+| ratio, 2-pitch arsenal | 1.066 | 1.014 | 1.001 | 0.998 | 0.997 |
+| ratio, 4-pitch arsenal | 1.138 | 1.037 | 1.012 | 0.999 | 0.999 |
+
+(Synthetic pitchers whose true unpredictability is identical in every column.)
+
+`compute_baseline.R` originally took a random 50/50 split of each pitcher's *full*
+multi-season history — often thousands of training pitches, and a test window of
+comparable size — while `run_daily.R` trains on at most 500 and scores a single
+day. μ was therefore measured at the flat end of that curve while production ran
+at the steep end, inflating every published score, worst for short-history
+pitchers with deep arsenals. σ was affected too: estimating each ratio from
+thousands of test pitches removes the estimation noise that a real one-day window
+carries, so σ came out too small and production spread exceeded 10.
+
+It now samples real game-days and reconstructs each one exactly as the daily
+pipeline would — same history cap, same minimums, same one-day test window.
+
+(A related worry turned out not to matter: pitchers drift across a season, so a
+random split sees no drift while a temporal split does. Measured, the effect on the
+ratio is under 0.004 — drift raises model and baseline surprise together and
+cancels. Training size is the variable that matters.)
 
 **`baseline_params.rds` is versioned.** Any change to the scoring math invalidates
 previously saved μ/σ, and `run_daily.R` warns loudly rather than silently
@@ -314,11 +393,16 @@ Several features are categorical despite numeric appearance:
   - Runner on 1st ≠ 2 × runner on 2nd
   - Non-linear importance by configuration
 
+- `count`: 12-level factor over (balls, strikes). Jointly, not additively —
+  3-0 and 0-2 are not two steps along one axis.
+
+- `outs`: 3-level factor. One extra dummy, and it drops the assumption that two
+  outs is twice one out.
+
 ### Continuous Variables
 
 Some features remain continuous:
 
-- `balls`, `strikes`, `outs`: Natural ordinal scale
 - `score_diff`: Linear relationship (ahead by 5 ≈ 2.5 × ahead by 2)
 - Batter metrics (`o_swing_pct`, etc.): Continuous percentages (WIP)
 
