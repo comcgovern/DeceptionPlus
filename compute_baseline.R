@@ -174,9 +174,44 @@ if (nrow(all_results) == 0) {
 
 message("\nComputing baseline parameters...")
 
-# Compute stable μ and σ across all runs
-baseline_mu <- mean(all_results$unpredictability_ratio, na.rm = TRUE)
-baseline_sd <- sd(all_results$unpredictability_ratio, na.rm = TRUE)
+# Compute stable μ and σ across all runs.
+#
+# Trim the tails first. μ and σ define the entire Deception+ scale, so a handful
+# of extreme ratios drags the scale for everyone: the previous baseline_params.rds
+# recorded μ = 2.466, σ = 2.355 — a coefficient of variation near 1, which is the
+# signature of a heavy-tailed contaminant, not of a population of pitchers.
+# (Most of that tail came from the prediction-alignment bug now fixed in
+# safe_predict_probs(); trimming keeps the estimator robust regardless.)
+TRIM <- 0.01  # drop the top and bottom 1% of ratios
+
+ratios_all <- all_results$unpredictability_ratio
+ratios_all <- ratios_all[is.finite(ratios_all)]
+if (length(ratios_all) == 0) stop("No finite unpredictability ratios to summarise")
+
+lim <- quantile(ratios_all, c(TRIM, 1 - TRIM), na.rm = TRUE)
+ratios <- ratios_all[ratios_all >= lim[1] & ratios_all <= lim[2]]
+
+n_trimmed <- length(ratios_all) - length(ratios)
+message(sprintf("  Trimmed %d of %d observations (%.1f%%) outside [%.4f, %.4f]",
+                n_trimmed, length(ratios_all),
+                100 * n_trimmed / length(ratios_all), lim[1], lim[2]))
+
+baseline_mu <- mean(ratios)
+baseline_sd <- sd(ratios)
+
+if (!is.finite(baseline_sd) || baseline_sd <= 0) {
+  stop("Baseline σ is not usable (", baseline_sd, "); check the input data.")
+}
+
+# Sanity check: a healthy ratio distribution sits near 1 — the full model, which
+# strictly dominates the baseline in information, should not be routinely more
+# surprised than it.
+if (baseline_mu > 1.5) {
+  warning("Baseline μ = ", round(baseline_mu, 3), " is far above 1. The full model ",
+          "is on average much more surprised than the simple baseline, which usually ",
+          "means the per-pitcher models are overfitting rather than that pitchers ",
+          "are unpredictable. Check `decay` and `prob_shrinkage`.")
+}
 
 # Summary stats
 n_observations <- nrow(all_results)
@@ -198,6 +233,13 @@ cat("============================================================\n\n")
 
 # Save baseline parameters
 baseline_params <- list(
+ # Bumped whenever a change to the scoring math makes previously saved μ/σ
+ # incomparable. run_daily.R refuses to trust a baseline stamped with an older
+ # version, because standardising new ratios against an old scale silently
+ # shifts every published score.
+ #   2 — probability alignment / smoothing overhaul (surprise is now bounded and
+ #       label-correct, so ratios centre near 1 instead of near 2.5)
+ method_version = 2L,
  mu = baseline_mu,
  sd = baseline_sd,
  n_runs = N_RUNS,
@@ -207,6 +249,8 @@ baseline_params <- list(
  date_computed = Sys.time(),
  data_period = paste(BASELINE_START, "to", BASELINE_END),
  min_pitches = MIN_PITCHES,
+ trim = TRIM,
+ n_trimmed = n_trimmed,
  feature_names = FEATURE_NAMES,
  baseline_keys = BASELINE_KEYS
 )

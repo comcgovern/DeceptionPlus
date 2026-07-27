@@ -45,6 +45,14 @@ N_HISTORY_PITCHES <- as.integer(get_arg("--n_history", "500"))
 # Minimum historical pitches required to evaluate a pitcher
 MIN_HISTORY_PITCHES <- as.integer(get_arg("--min_history", "100"))
 
+# Minimum pitches thrown on the day before a Deception+ score is published.
+# This used to be 1. A ratio of two mean surprises estimated from a single pitch
+# is not an estimate of anything: across the 2026 output, pitchers with 1-4 test
+# pitches showed ~3.5x the score dispersion of pitchers with 80+, and the tail
+# of that noise is what reached the leaderboards. Pitchers below the threshold
+# still appear in the CSV, flagged "insufficient_test_pitches" with a blank score.
+MIN_TEST_PITCHES <- as.integer(get_arg("--min_test", "5"))
+
 # Minimum test pitches for social media graphics (role-specific thresholds)
 MIN_PITCHES_STARTER_SOCIAL  <- 50
 MIN_PITCHES_RELIEVER_SOCIAL <- 10
@@ -108,6 +116,12 @@ ensure_directories()
 # LOAD BASELINE PARAMETERS
 # ============================================================================
 
+# The scoring math must match the math that produced μ and σ. A baseline written
+# before the probability-alignment fix encodes the old, inflated ratio scale
+# (μ ≈ 2.47, σ ≈ 2.35); standardising corrected ratios against it would push
+# every pitcher to roughly the same wrong number.
+BASELINE_METHOD_VERSION <- 2L
+
 if (!file.exists(BASELINE_FILE)) {
   warning("Baseline file not found: ", BASELINE_FILE)
   warning("Using fallback values. Run compute_baseline.R for stable baseline.")
@@ -118,6 +132,19 @@ if (!file.exists(BASELINE_FILE)) {
   message("  Baseline μ = ", round(baseline_params$mu, 4),
           ", σ = ", round(baseline_params$sd, 4))
   message("  Computed from: ", baseline_params$data_period)
+
+  found_version <- baseline_params$method_version %||% 1L
+  if (found_version < BASELINE_METHOD_VERSION) {
+    warning(
+      "\n", strrep("=", 72), "\n",
+      "STALE BASELINE: ", BASELINE_FILE, " was computed with scoring method v",
+      found_version, "; this code is v", BASELINE_METHOD_VERSION, ".\n",
+      "Those mu/sigma values came from the pre-fix scale and Deception+ computed\n",
+      "against them is NOT comparable to published scores or to each other.\n",
+      "Re-run compute_baseline.R before treating today's output as final.\n",
+      strrep("=", 72)
+    )
+  }
 }
 
 # ============================================================================
@@ -295,7 +322,7 @@ eval_result <- evaluate_per_pitcher(
   df_history = df_history,
   df_test = df_test,
   min_train_pitches = MIN_HISTORY_PITCHES,
-  min_test_pitches = 1,  # Include all pitchers with any test pitches
+  min_test_pitches = MIN_TEST_PITCHES,
   feature_names = FEATURE_NAMES,
   baseline_keys = BASELINE_KEYS,
   verbose = TRUE
@@ -358,8 +385,8 @@ evaluated_ppi <- per_pitcher_results %>%
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
-    mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, deception_plus, status
+    n_classes, mean_surp_model, mean_surp_base, ppi,
+    unpredictability_ratio, surp_excess, deception_plus, status
   ) %>%
   dplyr::arrange(dplyr::desc(deception_plus))
 
@@ -373,17 +400,19 @@ excluded_ppi <- excluded_pitchers %>%
                                    pitcher_name),
     total_pitches = n_history,
     n_pitches_test = n_test,
+    n_classes = NA_integer_,
     mean_surp_model = NA_real_,
     mean_surp_base = NA_real_,
     ppi = NA_real_,
     unpredictability_ratio = NA_real_,
+    surp_excess = NA_real_,
     deception_plus = NA_real_,
     role = dplyr::coalesce(role, "unknown")
   ) %>%
   dplyr::select(
     pitcher_id, pitcher_name, role, total_pitches, n_pitches_test,
-    mean_surp_model, mean_surp_base, ppi,
-    unpredictability_ratio, deception_plus, status
+    n_classes, mean_surp_model, mean_surp_base, ppi,
+    unpredictability_ratio, surp_excess, deception_plus, status
   )
 
 # Combine evaluated and excluded pitchers
@@ -411,6 +440,7 @@ res <- list(
 n_evaluated <- sum(pitcher_ppi$status == "evaluated")
 n_debuts <- sum(pitcher_ppi$status == "debut_no_history")
 n_insufficient <- sum(pitcher_ppi$status == "insufficient_history")
+n_short_outing <- sum(pitcher_ppi$status == "insufficient_test_pitches")
 
 # Save model metadata
 saveRDS(list(
@@ -420,10 +450,12 @@ saveRDS(list(
   level = LEVEL,
   n_history_pitches = N_HISTORY_PITCHES,
   min_history_pitches = MIN_HISTORY_PITCHES,
+  min_test_pitches = MIN_TEST_PITCHES,
   feature_names = FEATURE_NAMES,
   n_pitchers_evaluated = n_evaluated,
   n_pitchers_debut = n_debuts,
-  n_pitchers_insufficient = n_insufficient
+  n_pitchers_insufficient = n_insufficient,
+  n_pitchers_short_outing = n_short_outing
 ), OUT_MODEL)
 message("Model metadata saved: ", OUT_MODEL)
 
@@ -457,6 +489,9 @@ if (n_debuts > 0) {
 }
 if (n_insufficient > 0) {
   cat("Insufficient Hist: ", n_insufficient, " (<", MIN_HISTORY_PITCHES, " pitches)\n", sep = "")
+}
+if (n_short_outing > 0) {
+  cat("Short Outings:     ", n_short_outing, " (<", MIN_TEST_PITCHES, " pitches today)\n", sep = "")
 }
 cat("Total Test Pitches:", sum(pitcher_ppi$n_pitches_test, na.rm = TRUE), "\n")
 cat("Baseline:          μ=", round(baseline_params$mu, 4),

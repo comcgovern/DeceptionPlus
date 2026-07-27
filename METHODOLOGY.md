@@ -79,7 +79,7 @@ A multinomial logistic regression predicting pitch type from:
 #### Game Context
 - `balls`, `strikes`: Current count
 - `two_strikes`: Binary indicator for 2-strike counts
-- `ahead_in_count`: Binary indicator for hitter-favorable counts
+- `ahead_in_count`: Binary indicator for **pitcher**-favorable counts (`strikes > balls`)
 - `outs`: Current outs (0, 1, 2)
 - `inning`: Which inning (treated as categorical, not continuous)
 - `score_diff`: Home score - away score
@@ -137,6 +137,25 @@ This captures basic situational tendencies without deep context or sequencing.
 3. **Hybrid**: Conditional when possible, marginal fallback
    - Robust to sparse data
    - Recommended for most uses
+
+**Smoothing.** Conditional cells are smoothed by backing off toward the pitcher's
+marginal mix rather than toward a uniform distribution:
+
+```
+P(class | cell) = (n_cell,class + α · P_marginal(class)) / (n_cell + α)
+```
+
+The distinction is not cosmetic. Plain add-one smoothing puts a pseudo-count on
+*every* class, so a cell holding four real pitches from an eight-pitch vocabulary
+is two-thirds prior — and that prior asserts the pitcher is equally likely to
+throw all eight, which is never true. It inflates baseline surprise in proportion
+to arsenal size, and since Deception+ divides by baseline surprise, it quietly
+rewarded deep arsenals. Backing off to the marginal mix removes that dependence
+and converges on the raw cell frequencies as cells fill.
+
+Cells absent from the training window fall back to the marginal mix as well.
+(A uniform `1/K` fallback charges ~log K nats of baseline surprise for a context
+the baseline simply never encountered — arbitrary, and it deflates the ratio.)
 
 ### The Comparison
 
@@ -196,6 +215,44 @@ This gives us:
 - **Mean = 100** (league average)
 - **SD = 10** (one standard deviation = 10 points)
 - **Intuitive scale**: Similar to ERA+, wRC+, etc.
+
+### Which Population Sets μ and σ?
+
+`train_ppi(standardize = ...)` chooses the reference population:
+
+- **`"test"`** (default) — μ and σ from the pitchers actually evaluated. The
+  output then genuinely has mean 100 and SD 10, as described above.
+- **`"train"`** — μ and σ from the training period, giving an anchor that does not
+  move when you change the test window. Useful for comparing several test windows
+  fit from a single training window, but note it is measured **in sample**: model
+  surprise on training data is optimistically low, so this μ sits below the
+  out-of-sample μ and every score shifts upward. It is a stable anchor, not an
+  unbiased one.
+
+The daily pipeline is different again: it standardizes against fixed μ/σ stored in
+`baseline_params.rds` by `compute_baseline.R`, so that scores are comparable from
+day to day. Those parameters are estimated from repeated random splits with the
+top and bottom 1% of ratios trimmed — μ and σ define the whole scale, so a handful
+of extreme values would otherwise drag it for everyone.
+
+**`baseline_params.rds` is versioned.** Any change to the scoring math invalidates
+previously saved μ/σ, and `run_daily.R` warns loudly rather than silently
+publishing scores on a stale scale. Re-run `compute_baseline.R` after such a
+change.
+
+### A Caveat on the Ratio
+
+Dividing two mean surprises is only well-conditioned when the denominator is
+comfortably above zero. For a pitcher who throws one pitch ~99% of the time, both
+the model and the baseline predict nearly perfectly, both mean surprises are close
+to zero, and their ratio is dominated by the rounding-level gap between them — such
+a pitcher can post a higher ratio than a genuinely coin-flip pitcher while the
+actual information gap is ~0.01 nats.
+
+The `surp_excess` column (model surprise **minus** baseline surprise, in nats)
+measures the same thing on a difference scale and does not have this failure mode.
+It is reported alongside the ratio, and is the sounder basis for any future
+respecification of Deception+.
 
 ## Training and Testing Periods
 
@@ -288,16 +345,34 @@ This prevents model fitting errors on constant predictors.
 ```r
 model <- nnet::multinom(
   pitch_class ~ balls + strikes + two_strikes + ... ,
-  data = training_data,
+  data  = training_data,
   trace = FALSE,
-  maxit = 500
+  maxit = 500,     # 200 for per-pitcher models
+  decay = 1e-4     # 0.01 for per-pitcher models
 )
 ```
 
 - `pitch_class`: Response variable (pitch type factor)
 - Formula: All features included
 - `maxit = 500`: Usually converges in 50-100 iterations
-- No regularization: Want to fully fit training patterns
+- `decay`: light L2 penalty. The seasonal model is fit on hundreds of thousands
+  of pitches and barely notices it; the per-pitcher models are fit on a few
+  hundred pitches with a wide `last_pitch_type` factor, where separation is the
+  norm rather than the exception, and need the stronger setting.
+
+### Response Vocabulary Is Per-Pitcher
+
+Each per-pitcher model ranges over **that pitcher's own** pitch types — the classes
+in their history, plus any class they actually threw in the test window — not the
+league-wide vocabulary. Carrying league-wide factor levels into an individual
+model means most outcome classes have zero observations, and `nnet::multinom`
+responds by dropping them, leaving the fitted model narrower than the class set the
+caller believes it is working with.
+
+Test-window classes are deliberately kept in the support even when they are absent
+from the pitcher's history. A pitcher unveiling a new pitch *is* being
+unpredictable; that is the signal, not an inconvenience. Those pitches are scored
+against the smoothed prior, earning high but finite surprise.
 
 ### Convergence
 
@@ -317,19 +392,46 @@ If model fails to converge:
 ### From Model Predictions
 
 ```r
-# Get probability matrix: rows = pitches, columns = pitch types
-P_model <- predict(model, newdata = test_data, type = "probs")
+# Get probability matrix: rows = pitches, columns = pitch types.
+# safe_predict_probs() aligns the model's output to `classes` BY NAME.
+# This matters: nnet::multinom silently drops response levels it never saw, and
+# with exactly two levels predict() returns a bare vector instead of a matrix,
+# so the number and order of returned columns cannot be assumed.
+classes <- levels(training_data$pitch_class)
+P_model <- safe_predict_probs(model, test_data, classes)
+
+# Mix in a little of the training pitch mix before taking logs (see below)
+P_model <- shrink_to_prior(P_model, class_prior(training_data$pitch_class, classes))
 
 # For each pitch, extract probability of the actual pitch thrown
-classes <- levels(training_data$pitch_class)
-idx_actual <- match(test_data$pitch_class, classes)
+idx_actual <- match(as.character(test_data$pitch_class), classes)
 p_actual_model <- P_model[cbind(1:nrow(test_data), idx_actual)]
 
 # Calculate surprise
-surprise_model <- -log(pmax(p_actual_model, 1e-12))
+surprise_model <- -log(pmax(p_actual_model, 1e-9))
 ```
 
-The `pmax(..., 1e-12)` ensures we never take log(0).
+### Bounding the Surprise
+
+`-log(p)` is unbounded as `p → 0`, and an unpenalized multinomial fit on a few
+hundred pitches reaches complete separation routinely — it will happily report
+`p = 1e-15`. Clamping at some tiny epsilon does not fix this; it just converts an
+arbitrary probability into an arbitrary constant (a clamp at `1e-9` yields 20.7
+nats, roughly fifteen times a typical pitch's surprise).
+
+That matters more than it looks, because Deception+ is a *ratio*. The baseline is
+a smoothed frequency table and so has a natural probability floor, while the model
+did not. An unbounded numerator over a bounded denominator manufactures extreme
+scores out of numerical noise.
+
+Two mitigations, applied together:
+
+1. **Weight decay** on the multinomial fit (`decay`), which keeps coefficients —
+   and therefore fitted probabilities — away from the 0/1 boundary.
+2. **Shrinkage toward a prior** (`prob_shrinkage`): each probability row is mixed
+   with the training pitch mix, `p' = (1-λ)p + λ·prior`, before `-log()`. Applied
+   identically to model and baseline, so both sit on the same floor. Mixing with a
+   fixed distribution preserves the proper-scoring-rule property.
 
 ### From Baseline Model
 

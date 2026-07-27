@@ -52,14 +52,15 @@ devtools::install_github("saberpowers/sabRmetrics")
 source("pitch_ppi.R")
 
 # Analyze 2025 regular season
-# Train on full season, evaluate last 30 days
+# Train on Mar-Aug, evaluate September
 result <- train_and_save(
-  start_date = "2025-03-01",
-  end_date = "2025-09-30",
-  test_days = 30,
+  train_start = "2025-03-01",
+  train_end   = "2025-08-31",
+  test_start  = "2025-09-01",
+  test_end    = "2025-09-30",
   min_total_pitches = 50,
-  out_model = "ppi_model.rds",
-  out_ppi = "pitcher_ppi.csv"
+  out_model = "models/ppi_model.rds",
+  out_ppi   = "output/pitcher_ppi.csv"
 )
 
 # View top unpredictable pitchers
@@ -73,23 +74,37 @@ You can train and test on any periods — same, overlapping, or separate:
 ```r
 # Train on regular season, test on playoffs
 result <- train_ppi(
-  start_date = "2025-03-01",      # Training period
-  end_date = "2025-09-30",
-  test_days = NULL,                # Use explicit test period instead
-  test_start_date = "2025-10-01",  # Test period
-  test_end_date = "2025-11-05"
+  train_start = "2025-03-01",      # Training period
+  train_end   = "2025-09-30",
+  test_start  = "2025-10-01",      # Test period
+  test_end    = "2025-11-05",
+  test_game_type = "P"             # R = regular season, P = playoffs, W = World Series
+)
+```
+
+Or split one period at random instead of by date:
+
+```r
+result <- train_ppi(
+  train_start  = "2025-03-01",
+  train_end    = "2025-09-30",
+  split_method = "random",         # 50/50 per pitcher; test dates are ignored
+  random_seed  = 42
 )
 ```
 
 ### AAA Analysis
 
 ```r
-# Analyze Triple-A data
+# Analyze Triple-A data. Level (MLB/AAA) and game_type (R/P/S/W) are separate
+# knobs — game_type selects regular season vs. playoffs, not the league.
 result <- train_and_save(
-  start_date = "2025-04-01",
-  end_date = "2025-09-15",
-  game_type = "AAA",               # Use AAA instead of MLB
-  test_days = 30,
+  train_start = "2025-04-01",
+  train_end   = "2025-08-15",
+  test_start  = "2025-08-16",
+  test_end    = "2025-09-15",
+  train_level = "AAA",
+  test_level  = "AAA",
   min_total_pitches = 50
 )
 ```
@@ -142,19 +157,30 @@ The main output (`pitcher_ppi.csv`) includes:
 | `mean_surp_base` | Average surprise from baseline model |
 | `ppi` | Pitch Predictability Index (1 - ratio, range: -1 to 1) |
 | `unpredictability_ratio` | Model surprise / baseline surprise |
-| `deception_plus` | Scaled metric (mean=100, SD=10) |
+| `surp_excess` | Model surprise **minus** baseline surprise, in nats. Same comparison as the ratio on a difference scale. Prefer it when the baseline surprise is small: for a pitcher who throws one pitch 99% of the time, both surprises are near zero and their *ratio* swings wildly on rounding-level differences, while the difference correctly reports "no meaningful gap." |
+| `deception_plus` | Scaled metric (mean=100, SD=10 over the evaluated population) |
+
+The daily output additionally carries `n_classes` (the size of that pitcher's
+pitch vocabulary), `role`, and `status`. Rows with a `status` other than
+`evaluated` are pitchers who appeared but could not be scored — a debut with no
+history, too little history, or too few pitches on the day — and their metric
+columns are intentionally blank.
 
 ## Advanced Usage
 
 ### Custom Features
 
 ```r
-# Specify which features to include
+# Specify which features to include.
+# Note: the engineered feature is `times_through_order` — `n_thruorder_pitcher`
+# is the raw Statcast column it is derived from and is not a model feature.
 result <- train_and_save(
-  start_date = "2025-03-01",
-  end_date = "2025-09-30",
+  train_start = "2025-03-01",
+  train_end   = "2025-08-31",
+  test_start  = "2025-09-01",
+  test_end    = "2025-09-30",
   feature_names = c("balls", "strikes", "two_strikes", "ahead_in_count",
-                    "high_leverage", "n_thruorder_pitcher", "outs",
+                    "high_leverage", "times_through_order", "outs",
                     "score_diff", "base_state", "is_risp",
                     "stand", "p_throws", "last_pitch_type",
                     "o_swing_pct", "z_contact_pct", "swing_pct"),
@@ -162,18 +188,34 @@ result <- train_and_save(
 )
 ```
 
+### Scoring Controls
+
+Three parameters govern how probabilities become surprise. The defaults are
+sane; change them only if you know why.
+
+| Parameter | Default | What it does |
+|-----------|---------|--------------|
+| `decay` | `1e-4` seasonal, `0.01` per-pitcher | Weight decay (L2 penalty) on the multinomial fit. Small per-pitcher samples separate easily; without a penalty the fit emits probabilities of 0 and 1 and `-log(p)` stops measuring surprise. |
+| `prob_shrinkage` | `0.02` | Prior mass mixed into predicted probabilities before `-log()`. Keeps model and baseline surprise on the same floor so their ratio stays meaningful. |
+| `standardize` | `"test"` | Population whose μ/σ anchor the Deception+ scale. `"test"` makes the output actually have mean 100 / SD 10. `"train"` gives a test-period-independent anchor but is measured in-sample and therefore optimistically biased. |
+
 ### Command Line
 
 ```bash
 Rscript pitch_ppi.R \
-  --start 2025-03-01 \
-  --end 2025-09-30 \
-  --test_days 30 \
+  --train_start 2025-03-01 \
+  --train_end   2025-08-31 \
+  --test_start  2025-09-01 \
+  --test_end    2025-09-30 \
   --min_total_pitches 50 \
-  --game_type R \
-  --out_model ppi_model.rds \
-  --out_ppi pitcher_ppi.csv
+  --train_game_type R \
+  --test_game_type R \
+  --out_model models/ppi_model.rds \
+  --out_ppi   output/pitcher_ppi.csv
 ```
+
+Run with no arguments to see the full option list, including `--split_method`,
+`--baseline_type`, `--standardize`, `--decay` and `--prob_shrinkage`.
 
 ## Data Sources
 
@@ -182,6 +224,18 @@ Rscript pitch_ppi.R \
 - **Pitcher names**: MLB Stats API with local caching
 
 ## Technical Notes
+
+### Standardization Baseline (`baseline_params.rds`)
+
+The daily pipeline standardizes against fixed μ/σ stored in `baseline_params.rds`,
+so that a score means the same thing on Tuesday as it did in April. That file is
+produced by `compute_baseline.R` (or the `compute-baseline` workflow) and is
+stamped with a `method_version`.
+
+> **Re-run `compute_baseline.R` after any change to the scoring math.** μ and σ
+> define the entire Deception+ scale, so standardizing new ratios against an old
+> file shifts every published score. `run_daily.R` checks the stamp and warns
+> loudly rather than failing silently, but it cannot fix the scale for you.
 
 ### Baseline Selection
 

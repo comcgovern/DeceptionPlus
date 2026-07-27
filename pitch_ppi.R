@@ -17,22 +17,103 @@ suppressPackageStartupMessages({
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 safe_div <- function(a, b) ifelse(b > 0, a / b, 0)
 
-# Safe wrapper for multinom predict with 2-class edge case handling.
-# When nnet::multinom has exactly 2 classes, predict(type="probs") returns
-# a vector of P(class2) only. This converts it to a proper probability matrix.
+# Safe wrapper for multinom predict.
+#
+# predict.multinom() is deceptively shape-shifting and the naive handling of it
+# silently corrupts the metric.  Two traps:
+#
+#   1. nnet::multinom() DROPS response levels with zero observations (it warns
+#      "groups ... are empty").  A pitcher's pitch_class factor usually carries
+#      the league-wide level set, so the fitted model returns FEWER columns than
+#      `classes` for essentially every pitcher.
+#   2. With exactly two fitted levels, predict(type="probs") returns a bare
+#      vector of P(second level); with a single test row it returns a bare
+#      *named* vector over levels instead.
+#
+# The previous fallback reshaped the prediction with matrix(P, ncol=length(classes)),
+# which recycles the flattened probabilities across columns — attaching the wrong
+# class label to every probability and producing rows that do not sum to 1.
+# Everything downstream (-log p) then measured noise rather than surprise.
+#
+# This version aligns strictly BY CLASS NAME and leaves classes the model never
+# saw at zero, for the caller to smooth against a prior.
 safe_predict_probs <- function(mod, newdata, classes) {
+  n <- nrow(newdata)
+  # Levels the model was actually fitted on — never assume these match `classes`.
+  fit_lev <- mod$lev %||% classes
   P <- predict(mod, newdata = newdata, type = "probs")
-  if (is.matrix(P) && ncol(P) == length(classes)) return(P)
-  # 2-class case: P is a vector of P(second class)
-  if (length(classes) == 2 && is.numeric(P) && !is.matrix(P)) {
-    P <- cbind(1 - P, P)
-    colnames(P) <- classes
-    return(P)
+
+  if (!is.matrix(P)) {
+    if (n == 1L && length(P) == length(fit_lev) && identical(names(P), fit_lev)) {
+      # Single test row, >2 fitted levels: named vector over levels.
+      P <- matrix(as.numeric(P), nrow = 1L, dimnames = list(NULL, fit_lev))
+    } else if (length(fit_lev) == 2L && length(P) == n) {
+      # Two fitted levels: vector of P(second level).
+      p2 <- as.numeric(P)
+      P <- cbind(1 - p2, p2)
+      colnames(P) <- fit_lev
+    } else {
+      stop("Unrecognised predict.multinom() shape: length ", length(P),
+           " for ", n, " rows and ", length(fit_lev), " fitted levels.")
+    }
   }
-  # General fallback: force to matrix
-  P <- as.matrix(P)
-  if (ncol(P) != length(classes)) {
-    P <- matrix(P, nrow = nrow(newdata), ncol = length(classes), dimnames = list(NULL, classes))
+
+  src <- colnames(P)
+  if (is.null(src)) {
+    if (ncol(P) != length(fit_lev)) {
+      stop("Unlabelled prediction matrix with ", ncol(P), " columns but ",
+           length(fit_lev), " fitted levels; cannot align safely.")
+    }
+    src <- fit_lev
+  }
+
+  out <- matrix(0, nrow = n, ncol = length(classes), dimnames = list(NULL, classes))
+  shared <- intersect(src, classes)
+  if (length(shared) == 0L) {
+    stop("Fitted classes (", paste(src, collapse = ", "),
+         ") share no levels with the requested classes (",
+         paste(classes, collapse = ", "), ").")
+  }
+  out[, shared] <- P[, shared, drop = FALSE]
+  out
+}
+
+# Laplace-smoothed marginal distribution of `y` over `classes`.
+# Used both as the fallback for unseen contexts and as the shrinkage target when
+# turning model probabilities into surprise.
+class_prior <- function(y, classes, alpha = 1) {
+  cnt <- as.numeric(table(factor(as.character(y), levels = classes)))
+  (cnt + alpha) / sum(cnt + alpha)
+}
+
+# Shrink a probability matrix toward `prior` before it is fed to -log().
+#
+# Two jobs:
+#   • Repair rows the model could not score (NA from predict()'s na.omit, or all
+#     zeros because the row's class was never fitted) by falling back to `prior`.
+#   • Bound the surprise.  An unpenalised multinomial fit on a few hundred
+#     pitches routinely hits complete separation and emits p ≈ 1e-15, which the
+#     old eps=1e-9 clamp turned into a flat 20.7 nats — an order of magnitude
+#     above anything the Laplace-smoothed baseline can produce.  Because the
+#     metric is a RATIO of the two surprises, that asymmetry alone manufactured
+#     Deception+ scores in the hundreds.  Mixing in a little prior mass floors
+#     both numerator and denominator on the same scale and keeps the score a
+#     proper scoring rule.
+shrink_to_prior <- function(P, prior, lambda = 0.02) {
+  stopifnot(ncol(P) == length(prior))
+  P[!is.finite(P)] <- 0
+  P[P < 0] <- 0
+  prior_mat <- matrix(prior, nrow = nrow(P), ncol = length(prior), byrow = TRUE)
+  rs <- rowSums(P)
+  bad <- !is.finite(rs) | rs <= 0
+  if (any(bad)) {
+    P[bad, ] <- prior_mat[bad, , drop = FALSE]
+    rs[bad] <- 1
+  }
+  P <- P / rs
+  if (lambda > 0) {
+    P <- (1 - lambda) * P + lambda * prior_mat
+    P <- P / rowSums(P)
   }
   P
 }
@@ -271,7 +352,10 @@ is_swing_vec <- function(desc) {
 }
 in_strike_zone_vec <- function(zone) {
   z <- suppressWarnings(as.integer(zone))
-  !is.na(z) & z >= 1L & z <= 9L
+  # NA for unknown zone: an unlocated pitch is neither in nor out of the zone.
+  # Returning FALSE (the old behaviour) silently counted every unlocated pitch
+  # as out-of-zone, inflating the o_swing_pct / chase_contact_pct denominators.
+  ifelse(is.na(z), NA, z >= 1L & z <= 9L)
 }
 
 compute_batter_metrics <- function(df) {
@@ -322,14 +406,22 @@ synthesize_pitch_type <- function(df) {
 add_last_pitch <- function(df) {
   if (!"at_bat_number" %in% names(df)) df$at_bat_number <- NA
   if (!"pitch_number" %in% names(df)) df$pitch_number <- NA
+  # Lag pitch_class, not the raw pitch_type.  pitch_class is the canonicalised
+  # vocabulary the response uses (rare codes collapsed to "OTHER"); the raw
+  # pitch_type carries oddities like "EP"/"PO"/"FA" that appear in the test
+  # period but not in a given pitcher's training window.  Those became unseen
+  # factor levels -> NA -> the whole test pitch was dropped by complete.cases().
+  lag_src <- if ("pitch_class" %in% names(df)) df$pitch_class else df$pitch_type
   # Group by pitcher within each game so that the last pitch of one PA carries
   # into the first pitch of the next PA.  The old approach (grouping by at_bat_number)
   # reset to "NONE" at every PA boundary, silencing sequence context for ~50% of pitches.
   df %>%
+    mutate(.lag_src = lag_src) %>%
     arrange(.data$game_pk, .data$pitcher_id, .data$at_bat_number, .data$pitch_number) %>%
     group_by(.data$game_pk, .data$pitcher_id) %>%
-    mutate(last_pitch_type = dplyr::lag(.data$pitch_type)) %>%
+    mutate(last_pitch_type = dplyr::lag(.data$.lag_src)) %>%
     ungroup() %>%
+    select(-".lag_src") %>%
     mutate(last_pitch_type = if_else(
       is.na(.data$last_pitch_type) | .data$last_pitch_type == "" | .data$last_pitch_type == "NA",
       "NONE", toupper(.data$last_pitch_type)
@@ -369,7 +461,13 @@ engineer_features <- function(raw, include_batter_metrics = TRUE) {
     strikes         = suppressWarnings(as.integer(coalesce(.data$strikes, 0))),
     two_strikes     = if_else(.data$strikes == 2L, 1L, 0L),
     ahead_in_count  = if_else(.data$strikes > .data$balls, 1L, 0L),
-    base_state      = base_state_row(.data$on_1b, .data$on_2b, .data$on_3b),
+    # Factor, not numeric: the 0-7 code is a bit-mask of occupied bases, so
+    # "runner on 3rd" (4) is not four times "runner on 1st" (1).  Treating it as
+    # a continuous predictor — as the old code did — forced a nonsensical linear
+    # ordering on the base-out state.  METHODOLOGY.md always described it as an
+    # 8-level categorical.
+    base_state      = factor(base_state_row(.data$on_1b, .data$on_2b, .data$on_3b),
+                             levels = 0:7),
     is_risp         = if_else(!is.na(.data$on_2b) | !is.na(.data$on_3b), 1L, 0L),
     # score_diff from the pitcher's perspective:
     # positive = pitcher's team leads, negative = pitcher's team trails
@@ -454,139 +552,103 @@ prune_baseline_keys <- function(df, baseline_keys) {
 }
 
 # ---------------------- Baseline Models --------------------------------------
-compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditional", 
-                                   baseline_keys = c("balls","strikes","is_risp","stand","p_throws","two_strikes")) {
-  classes <- levels(tr_data$pitch_class)
-  eps <- 1e-12
-  
-  if (baseline_type == "marginal") {
-    # Marginal baseline: overall pitch type distribution with proper Laplace smoothing
-    # Ensure ALL classes get a pseudo-count (not just observed ones) so probs sum to 1
-    freq <- tibble::tibble(pitch_class = factor(classes, levels = classes)) %>%
-      dplyr::left_join(tr_data %>% dplyr::count(pitch_class, name = "n"), by = "pitch_class") %>%
-      dplyr::mutate(n = dplyr::coalesce(n, 0L))
-    probs <- (freq$n + 1) / sum(freq$n + 1)
-    P_base <- matrix(rep(probs, each = nrow(te_data)),
-                     nrow = nrow(te_data), ncol = length(classes),
-                     dimnames = list(NULL, classes))
-    return(P_base)
-  }
-  
-  if (baseline_type == "conditional") {
-    # Conditional baseline: conditioned on baseline_keys
-    keys_tr <- prune_baseline_keys(tr_data, baseline_keys)
-    if (length(keys_tr) == 0) {
-      warning("No valid baseline keys; falling back to marginal baseline.")
-      return(compute_baseline_probs(tr_data, te_data, baseline_type = "marginal", baseline_keys = baseline_keys))
-    }
+# Build the "key" column (the conditioning cell) the same way for train and test.
+.baseline_key <- function(d, keys) {
+  d %>%
+    mutate(across(all_of(keys), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
+    mutate(key = do.call(paste, c(across(all_of(keys)), sep = "_"))) %>%
+    pull(key)
+}
 
-    keydf <- tr_data %>%
-      mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
-      mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    raw_counts <- keydf %>% count(key, pitch_class, name = "n")
-    # Complete grid: every (key, class) pair gets a row — proper Laplace smoothing
-    all_keys <- unique(raw_counts$key)
-    complete_grid <- tidyr::expand_grid(
-      key = all_keys,
+#' Baseline pitch-type probabilities
+#'
+#' @param baseline_alpha Pseudo-count mass for the conditional cells.  Smoothing
+#'   backs off toward the pitcher's marginal mix rather than toward a uniform
+#'   distribution: the old `(n + 1) / sum(n + 1)` put one pseudo-count on EVERY
+#'   class, so a cell holding 4 real pitches from an 8-pitch vocabulary was 2/3
+#'   prior, and that prior insisted the pitcher was equally likely to throw all
+#'   eight.  It penalised deep arsenals purely for being deep, and — because
+#'   Deception+ divides by baseline surprise — quietly lifted their scores.
+compute_baseline_probs <- function(tr_data, te_data, baseline_type = "conditional",
+                                   baseline_keys = c("balls","strikes","is_risp","stand","p_throws","two_strikes"),
+                                   baseline_alpha = 5) {
+  classes <- levels(tr_data$pitch_class)
+
+  # Marginal mix over the training window (Laplace-smoothed so no class is 0).
+  probs_marginal <- class_prior(tr_data$pitch_class, classes, alpha = 1)
+  marginal_mat <- function(n) {
+    matrix(probs_marginal, nrow = n, ncol = length(classes),
+           byrow = TRUE, dimnames = list(NULL, classes))
+  }
+
+  if (baseline_type == "marginal") return(marginal_mat(nrow(te_data)))
+
+  if (!baseline_type %in% c("conditional", "hybrid")) {
+    stop("Unknown baseline_type: ", baseline_type, ". Use 'marginal', 'conditional', or 'hybrid'.")
+  }
+
+  keys_tr <- prune_baseline_keys(tr_data, baseline_keys)
+  if (length(keys_tr) == 0) {
+    if (baseline_type == "conditional") {
+      warning("No valid baseline keys; falling back to marginal baseline.")
+    }
+    return(marginal_mat(nrow(te_data)))
+  }
+
+  key_tr <- .baseline_key(tr_data, keys_tr)
+  key_te <- .baseline_key(te_data, keys_tr)
+
+  # Counts per (cell, class), then back off toward the marginal mix:
+  #   P(class | cell) = (n_cell_class + alpha * P_marginal(class)) / (n_cell + alpha)
+  # Sums to 1 by construction and converges on the raw cell frequencies as the
+  # cell fills up.
+  raw_counts <- tibble::tibble(key = key_tr, pitch_class = tr_data$pitch_class) %>%
+    count(key, pitch_class, name = "n")
+  n_by_key <- tibble::tibble(key = key_tr) %>% count(key, name = "n_key")
+
+  counts <- tidyr::expand_grid(
+      key = unique(key_tr),
       pitch_class = factor(classes, levels = classes)
+    ) %>%
+    dplyr::left_join(raw_counts, by = c("key", "pitch_class")) %>%
+    dplyr::left_join(n_by_key, by = "key") %>%
+    dplyr::mutate(
+      n = dplyr::coalesce(n, 0L),
+      prior = probs_marginal[match(as.character(pitch_class), classes)],
+      prob  = (n + baseline_alpha * prior) / (n_key + baseline_alpha)
     )
-    counts <- complete_grid %>%
-      dplyr::left_join(raw_counts, by = c("key", "pitch_class")) %>%
-      dplyr::mutate(n = dplyr::coalesce(n, 0L)) %>%
-      dplyr::group_by(key) %>%
-      dplyr::mutate(prob = (n + 1) / sum(n + 1)) %>%
-      dplyr::ungroup()
-    key_te <- te_data %>%
-      mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
-      mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    # Initialize with uniform for test keys not seen in training
-    P_base <- matrix(1/length(classes), nrow = nrow(te_data), ncol = length(classes),
-                     dimnames = list(NULL, classes))
-    counts_wide <- counts %>%
+
+  # "hybrid" only trusts a cell once it holds enough pitches; "conditional" uses
+  # every cell it saw.  Either way, cells absent from training fall back to the
+  # marginal mix — NOT to a uniform 1/K.  Uniform was both arbitrary and
+  # punishing: it charged ~log(K) nats of baseline surprise for a context the
+  # baseline had simply never encountered, deflating the ratio.
+  usable_keys <- if (baseline_type == "hybrid") {
+    n_by_key %>% filter(n_key >= 5) %>% pull(key)
+  } else {
+    unique(key_tr)
+  }
+
+  P_base <- marginal_mat(nrow(te_data))
+
+  counts_usable <- counts %>% filter(key %in% usable_keys)
+  if (nrow(counts_usable) > 0) {
+    counts_wide <- counts_usable %>%
       select(key, pitch_class, prob) %>%
       tidyr::pivot_wider(names_from = pitch_class, values_from = prob, values_fill = NA)
     matched <- dplyr::left_join(
-      tibble::tibble(key = key_te$key, .row = seq_len(nrow(key_te))),
+      tibble::tibble(key = key_te, .row = seq_len(length(key_te))),
       counts_wide, by = "key"
     )
-    for (cls in classes) {
-      if (cls %in% names(matched) && any(!is.na(matched[[cls]]))) {
-        idx <- which(!is.na(matched[[cls]]))
-        P_base[matched$.row[idx], cls] <- matched[[cls]][idx]
-      }
-    }
-    return(P_base)
-  }
-  
-  if (baseline_type == "hybrid") {
-    # Hybrid: conditional when possible, marginal fallback
-    keys_tr <- prune_baseline_keys(tr_data, baseline_keys)
-
-    # Marginal distribution with proper Laplace smoothing over ALL classes
-    freq <- tibble::tibble(pitch_class = factor(classes, levels = classes)) %>%
-      dplyr::left_join(tr_data %>% dplyr::count(pitch_class, name = "n"), by = "pitch_class") %>%
-      dplyr::mutate(n = dplyr::coalesce(n, 0L))
-    probs_marginal <- (freq$n + 1) / sum(freq$n + 1)
-
-    if (length(keys_tr) == 0) {
-      # No valid keys, use marginal
-      P_base <- matrix(rep(probs_marginal, each = nrow(te_data)),
-                       nrow = nrow(te_data), ncol = length(classes),
-                       dimnames = list(NULL, classes))
-      return(P_base)
-    }
-
-    # Conditional counts with proper Laplace smoothing
-    keydf <- tr_data %>%
-      mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
-      mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-    raw_counts <- keydf %>% count(key, pitch_class, name = "n")
-    # Complete grid ensures all classes get pseudo-count
-    all_keys <- unique(raw_counts$key)
-    complete_grid <- tidyr::expand_grid(
-      key = all_keys,
-      pitch_class = factor(classes, levels = classes)
-    )
-    counts <- complete_grid %>%
-      dplyr::left_join(raw_counts, by = c("key", "pitch_class")) %>%
-      dplyr::mutate(n = dplyr::coalesce(n, 0L)) %>%
-      dplyr::group_by(key) %>%
-      dplyr::mutate(prob = (n + 1) / sum(n + 1)) %>%
-      dplyr::ungroup()
-    key_counts <- keydf %>% count(key, name = "n_key")
-
-    key_te <- te_data %>%
-      mutate(across(all_of(keys_tr), ~ if (is.factor(.x) || is.character(.x)) na_safe_factor(.x) else na_safe_numeric(.x))) %>%
-      mutate(key = do.call(paste, c(across(all_of(keys_tr)), sep = "_")))
-
-    # Initialize with marginal (used for keys with insufficient data or unseen keys)
-    P_base <- matrix(rep(probs_marginal, each = nrow(te_data)),
-                     nrow = nrow(te_data), ncol = length(classes),
-                     dimnames = list(NULL, classes))
-
-    # Replace with conditional where we have sufficient data (>= 5 observations)
-    min_obs <- 5
-    qualified_keys <- key_counts %>% filter(n_key >= min_obs) %>% pull(key)
-    counts_qualified <- counts %>% filter(key %in% qualified_keys)
-    if (nrow(counts_qualified) > 0) {
-      counts_wide <- counts_qualified %>%
-        select(key, pitch_class, prob) %>%
-        tidyr::pivot_wider(names_from = pitch_class, values_from = prob, values_fill = NA)
-      matched <- dplyr::left_join(
-        tibble::tibble(key = key_te$key, .row = seq_len(nrow(key_te))),
-        counts_wide, by = "key"
-      )
+    hit <- !is.na(matched[[classes[1]]])
+    if (any(hit)) {
       for (cls in classes) {
-        if (cls %in% names(matched) && any(!is.na(matched[[cls]]))) {
-          idx <- which(!is.na(matched[[cls]]))
-          P_base[matched$.row[idx], cls] <- matched[[cls]][idx]
-        }
+        if (cls %in% names(matched)) P_base[matched$.row[hit], cls] <- matched[[cls]][hit]
       }
     }
-    return(P_base)
   }
-  
-  stop("Unknown baseline_type: ", baseline_type, ". Use 'marginal', 'conditional', or 'hybrid'.")
+
+  P_base
 }
 
 # ---------------------- Name resolver: StatsAPI + cache (+ baseballr fallback)
@@ -711,6 +773,14 @@ resolve_pitcher_names_with_fallback <- function(df_with_ids,
 #' @param min_train_pitches Minimum training pitches per pitcher (default: 100)
 #' @param min_test_pitches Minimum test pitches per pitcher (default: 10)
 #' @param feature_names Features to use in per-pitcher models
+#' @param decay Weight decay (L2 penalty) for nnet::multinom. Per-pitcher models
+#'   are fit on a few hundred pitches with a wide factor (`last_pitch_type`), so
+#'   complete separation is routine. Unpenalised, that drives fitted
+#'   probabilities to 0/1 and the resulting -log(p) is a numerical artefact
+#'   rather than a measure of surprise.
+#' @param prob_shrinkage Mass mixed into the model's predicted probabilities from
+#'   the pitcher's own marginal mix before taking -log(). Bounds the surprise on
+#'   the same scale as the smoothed baseline.
 #' @param verbose Print progress messages
 #' @return List with:
 #'   - results: Data frame with per-pitcher unpredictability metrics
@@ -724,6 +794,8 @@ evaluate_per_pitcher <- function(df_history,
                                                     "stand", "last_pitch_type"),
                                   baseline_keys = c("balls", "strikes", "stand", "two_strikes"),
                                   baseline_type = "conditional",
+                                  decay = 0.01,
+                                  prob_shrinkage = 0.02,
                                   verbose = TRUE) {
 
   # Prepare factor columns for history data
@@ -796,9 +868,11 @@ evaluate_per_pitcher <- function(df_history,
         pitcher_id = integer(),
         n_history = integer(),
         n_test = integer(),
+        n_classes = integer(),
         mean_surp_model = numeric(),
         mean_surp_base = numeric(),
-        unpredictability_ratio = numeric()
+        unpredictability_ratio = numeric(),
+        surp_excess = numeric()
       ),
       excluded = excluded
     ))
@@ -822,14 +896,36 @@ evaluate_per_pitcher <- function(df_history,
     ptr_history <- df_history %>% filter(pitcher_id == pid)
     ptr_test    <- df_test    %>% filter(pitcher_id == pid)
 
+    # Scope the outcome vocabulary to THIS pitcher.
+    #
+    # df_history$pitch_class carries the league-wide level set, and dplyr::filter
+    # does not drop unused levels, so every pitcher's model previously nominally
+    # ranged over every pitch type in MLB. Those empty levels were then dropped
+    # by nnet::multinom itself, leaving the fitted model narrower than `classes`
+    # and de-synchronising model output from baseline output.
+    #
+    # The support is the pitcher's own history plus anything they actually threw
+    # in the test window. Keeping the test-only classes matters: a pitcher
+    # unveiling a new pitch IS being unpredictable, and dropping those rows would
+    # discard exactly the evidence the metric exists to capture. They are scored
+    # against the smoothed prior, so they earn high — but finite — surprise.
+    classes <- union(
+      levels(droplevels(factor(as.character(ptr_history$pitch_class)))),
+      levels(droplevels(factor(as.character(ptr_test$pitch_class))))
+    )
+    classes <- sort(classes[!is.na(classes)])
+    if (length(classes) < 2) return(NULL)
+
+    ptr_history$pitch_class <- factor(as.character(ptr_history$pitch_class), levels = classes)
+    ptr_test$pitch_class    <- factor(as.character(ptr_test$pitch_class),    levels = classes)
+    ptr_history <- ptr_history %>% filter(!is.na(pitch_class))
+    ptr_test    <- ptr_test    %>% filter(!is.na(pitch_class))
+    if (nrow(ptr_history) == 0 || nrow(ptr_test) == 0) return(NULL)
+    if (nlevels(droplevels(ptr_history$pitch_class)) < 2) return(NULL)
+
     pf_tr <- prepare_features(ptr_history, feature_names)
     tr2   <- pf_tr$data
     feats <- pf_tr$features
-
-    ptr_test <- ptr_test %>%
-      mutate(pitch_class = factor(pitch_class, levels = levels(tr2$pitch_class)))
-    ptr_test <- ptr_test %>% filter(!is.na(pitch_class))
-    if (nrow(ptr_test) == 0) return(NULL)
 
     te2 <- ptr_test
     if (length(feats) > 0) {
@@ -848,16 +944,21 @@ evaluate_per_pitcher <- function(df_history,
       te2 <- te2[feat_complete, , drop = FALSE]
     }
     if (nrow(te2) == 0) return(NULL)
-    if (nlevels(droplevels(tr2$pitch_class)) < 2) return(NULL)
 
     form <- if (length(feats) == 0) as.formula("pitch_class ~ 1")
             else as.formula(paste("pitch_class ~", paste(feats, collapse = " + ")))
 
-    mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200), silent = TRUE)
+    mod <- try(suppressWarnings(
+      nnet::multinom(form, data = tr2, trace = FALSE, maxit = 200, decay = decay)
+    ), silent = TRUE)
     if (inherits(mod, "try-error")) return(NULL)
 
-    classes <- levels(tr2$pitch_class)
-    P <- safe_predict_probs(mod, te2, classes)
+    # Shrinkage target: the pitcher's own smoothed pitch mix over `classes`.
+    prior <- class_prior(tr2$pitch_class, classes, alpha = 1)
+
+    P <- try(safe_predict_probs(mod, te2, classes), silent = TRUE)
+    if (inherits(P, "try-error")) return(NULL)
+    P <- shrink_to_prior(P, prior, lambda = prob_shrinkage)
 
     idx_true <- match(as.character(te2$pitch_class), classes)
     if (any(is.na(idx_true))) return(NULL)
@@ -865,10 +966,13 @@ evaluate_per_pitcher <- function(df_history,
     p_true    <- P[cbind(seq_len(nrow(te2)), idx_true)]
     surp_model <- -log(pmax(p_true, eps))
 
-    # Baseline: conditional on count/situation (matches seasonal model methodology)
+    # Baseline: conditional on count/situation (matches seasonal model methodology).
+    # Shrunk with the identical rule so numerator and denominator of the ratio
+    # sit on the same probability floor.
     P_base <- compute_baseline_probs(tr2, te2,
                                       baseline_type = baseline_type,
                                       baseline_keys = baseline_keys)
+    P_base <- shrink_to_prior(P_base, prior, lambda = prob_shrinkage)
     p_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
     surp_base <- -log(pmax(as.numeric(p_base), eps))
 
@@ -876,9 +980,18 @@ evaluate_per_pitcher <- function(df_history,
       pitcher_id             = pid,
       n_history              = nrow(ptr_history),
       n_test                 = nrow(te2),
+      n_classes              = length(classes),
       mean_surp_model        = mean(surp_model),
       mean_surp_base         = mean(surp_base),
-      unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps)
+      unpredictability_ratio = mean(surp_model) / pmax(mean(surp_base), eps),
+      # Excess surprise in nats. Same comparison as the ratio, expressed as a
+      # difference. Reported because the ratio is unstable exactly where the
+      # baseline surprise is small: a one-pitch reliever whose model and
+      # baseline differ by 0.01 nats — noise — scores a ratio near 1.2, above a
+      # genuinely coin-flip pitcher at 1.0, purely from dividing noise by noise.
+      # The difference does not have that failure mode and is the sounder basis
+      # for any future respecification of Deception+.
+      surp_excess            = mean(surp_model) - mean(surp_base)
     )
   }
 
@@ -1013,7 +1126,12 @@ train_ppi <- function(train_start, train_end,
                       test_level = "MLB",
                       split_method = "temporal",
                       random_seed = NULL,
+                      decay = 1e-4,
+                      prob_shrinkage = 0.02,
+                      standardize = c("test", "train"),
                       verbose = TRUE) {
+
+  standardize <- match.arg(standardize)
 
   # Validate split_method
   if (!split_method %in% c("temporal", "random")) {
@@ -1174,11 +1292,11 @@ train_ppi <- function(train_start, train_end,
   
   if (verbose) message("Model formula: ", deparse(form))
   
-  mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500), silent = TRUE)
+  mod <- try(nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500, decay = decay), silent = TRUE)
   if (inherits(mod, "try-error")) {
     warning("Multinomial fit failed; retrying with intercept-only model.")
     form <- as.formula("pitch_class ~ 1")
-    mod  <- nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500)
+    mod  <- nnet::multinom(form, data = tr2, trace = FALSE, maxit = 500, decay = decay)
     feats <- character(0)
   }
   
@@ -1228,28 +1346,35 @@ train_ppi <- function(train_start, train_end,
   if (verbose) message("\n🎯 Evaluating test pitches...")
 
   eps <- 1e-9
-  P <- safe_predict_probs(mod, te2, classes)
+  # League-wide pitch mix over the training window: the shrinkage target that
+  # keeps model and baseline surprise on a common probability floor.
+  prior <- class_prior(tr2$pitch_class, classes, alpha = 1)
+
+  P <- shrink_to_prior(safe_predict_probs(mod, te2, classes), prior, lambda = prob_shrinkage)
 
   idx_true <- match(as.character(te2$pitch_class), classes)
   p_true   <- P[cbind(seq_len(nrow(te2)), idx_true)]
   surp_model <- -log(pmax(p_true, eps))
-  
+
   # ========== STEP 6: Baseline predictions and surprise ==========
   if (verbose) message("📐 Computing baseline...")
 
   P_base <- compute_baseline_probs(tr2, te2, baseline_type = baseline_type, baseline_keys = baseline_keys)
+  P_base <- shrink_to_prior(P_base, prior, lambda = prob_shrinkage)
   p_true_base <- P_base[cbind(seq_len(nrow(te2)), idx_true)]
   surp_base   <- -log(pmax(p_true_base, eps))
 
   # ========== STEP 6b: Compute training baseline for standardization ==========
-  # We compute in-sample unpredictability ratios on training data to establish
-
-  # "league average" unpredictability. This makes test period scores comparable
-  # across different test dates (given the same training period).
+  # In-sample unpredictability ratios on the training data. These give a
+  # test-period-independent anchor (`standardize = "train"`), which is useful when
+  # comparing several test windows fit from one training window — but they are
+  # measured IN SAMPLE, so model surprise here is optimistically low and the
+  # resulting μ sits below the out-of-sample μ. Standardising against it shifts
+  # every score upward, which is why it is no longer the default.
   if (verbose) message("📊 Computing training baseline for standardization...")
 
   # In-sample predictions on training data
-  P_train <- safe_predict_probs(mod, tr2, classes)
+  P_train <- shrink_to_prior(safe_predict_probs(mod, tr2, classes), prior, lambda = prob_shrinkage)
 
   idx_true_train <- match(as.character(tr2$pitch_class), classes)
   p_true_train <- P_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
@@ -1257,6 +1382,7 @@ train_ppi <- function(train_start, train_end,
 
   # Baseline for training data (in-sample)
   P_base_train <- compute_baseline_probs(tr2, tr2, baseline_type = baseline_type, baseline_keys = baseline_keys)
+  P_base_train <- shrink_to_prior(P_base_train, prior, lambda = prob_shrinkage)
   p_true_base_train <- P_base_train[cbind(seq_len(nrow(tr2)), idx_true_train)]
   surp_base_train <- -log(pmax(p_true_base_train, eps))
 
@@ -1300,7 +1426,10 @@ train_ppi <- function(train_start, train_end,
     filter(n_pitches_test >= min_test_pitches) %>%
     mutate(ppi = 1 - (mean_surp_model / pmax(mean_surp_base, 1e-9)),
            ppi = pmin(pmax(ppi, -1), 1),
-           unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9))
+           unpredictability_ratio = mean_surp_model / pmax(mean_surp_base, 1e-9),
+           # See evaluate_per_pitcher(): difference-scale companion to the ratio,
+           # stable where the baseline surprise is near zero.
+           surp_excess = mean_surp_model - mean_surp_base)
   
   # Total pitches across both periods (for reference)
   all_pitchers <- bind_rows(df_train, df_test) %>%
@@ -1325,18 +1454,34 @@ train_ppi <- function(train_start, train_end,
     filter(!is.na(ppi)) %>%
     mutate(pitcher_name = if_else(is.na(pitcher_name), paste0("Pitcher_", pitcher_id), pitcher_name))
 
-  # Standardize using TRAINING population parameters (train_u_mu, train_u_sd)
-  # This ensures scores are comparable across different test periods
-  # (given the same training baseline). Test mean won't be exactly 100,
-  # but scores are anchored to a stable reference population.
+  # Standardisation anchor.
+  #   "test"  (default) — μ and σ of the evaluated population, so the output
+  #           really does have mean 100 and SD 10 as README/METHODOLOGY promise.
+  #   "train" — the in-sample training population, stable across test windows
+  #           fit from one training window, but optimistically biased (see 6b).
+  test_u_mu <- mean(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
+  test_u_sd <- sd(pitcher_ppi$unpredictability_ratio, na.rm = TRUE)
+  if (!is.finite(test_u_sd) || test_u_sd <= 0) {
+    warning("Test-population SD is not usable; falling back to the training anchor.")
+    standardize <- "train"
+  }
+
+  anchor_mu <- if (standardize == "test") test_u_mu else train_u_mu
+  anchor_sd <- if (standardize == "test") test_u_sd else train_u_sd
+
+  if (verbose) {
+    message("   Standardising on the ", standardize, " population: μ=",
+            round(anchor_mu, 4), " σ=", round(anchor_sd, 4))
+  }
+
   pitcher_ppi <- pitcher_ppi %>%
     mutate(
-      deception_plus = 100 + 10 * ((unpredictability_ratio - train_u_mu) / pmax(train_u_sd, 1e-9))
+      deception_plus = 100 + 10 * ((unpredictability_ratio - anchor_mu) / pmax(anchor_sd, 1e-9))
     ) %>%
     select(
       pitcher_id, pitcher_name, total_pitches, n_pitches_test,
       mean_surp_model, mean_surp_base, ppi,
-      unpredictability_ratio, deception_plus
+      unpredictability_ratio, surp_excess, deception_plus
     ) %>%
     arrange(desc(deception_plus))
   
@@ -1359,8 +1504,13 @@ train_ppi <- function(train_start, train_end,
        train_period = paste(train_start, "to", train_end),
        test_period = if (split_method == "random") "random 50/50 split" else paste(test_start, "to", test_end),
        standardization = list(
+         anchor = standardize,
+         mu = anchor_mu,
+         sd = anchor_sd,
          train_mean = train_u_mu,
          train_sd = train_u_sd,
+         test_mean = test_u_mu,
+         test_sd = test_u_sd,
          n_train_pitchers = nrow(per_pitcher_train)
        ))
 }
@@ -1383,9 +1533,14 @@ train_and_save <- function(train_start, train_end,
                            test_level = "MLB",
                            split_method = "temporal",
                            random_seed = NULL,
+                           decay = 1e-4,
+                           prob_shrinkage = 0.02,
+                           standardize = c("test", "train"),
                            out_model = "models/ppi_model.rds",
                            out_ppi   = "output/pitcher_ppi.csv",
                            verbose   = TRUE) {
+
+  standardize <- match.arg(standardize)
 
   res <- train_ppi(train_start, train_end,
                    test_start, test_end,
@@ -1400,13 +1555,19 @@ train_and_save <- function(train_start, train_end,
                    test_level = test_level,
                    split_method = split_method,
                    random_seed = random_seed,
+                   decay = decay,
+                   prob_shrinkage = prob_shrinkage,
+                   standardize = standardize,
                    verbose = verbose)
-  
+
   saveRDS(list(
     classes = res$classes,
     features_used = res$features_used,
     baseline_keys = res$baseline_keys,
     baseline_type = res$baseline_type,
+    standardization = res$standardization,
+    decay = decay,
+    prob_shrinkage = prob_shrinkage,
     split_method = split_method,
     train_start = train_start,
     train_end = train_end,
@@ -1956,6 +2117,10 @@ if (length(args) > 0 && any(args == "--train_start")) {
   random_seed_str <- get_arg("--random_seed", NA)
   random_seed <- if (is.na(random_seed_str)) NULL else suppressWarnings(as.integer(random_seed_str))
 
+  decay          <- suppressWarnings(as.numeric(get_arg("--decay", "1e-4")))
+  prob_shrinkage <- suppressWarnings(as.numeric(get_arg("--prob_shrinkage", "0.02")))
+  standardize    <- get_arg("--standardize", "test")
+
   # For temporal split, test dates are required; for random split, they're optional
   if (split_method == "temporal" && (is.null(test_start) || is.null(test_end))) {
     stop("Usage: Rscript pitch_ppi.R --train_start YYYY-MM-DD --train_end YYYY-MM-DD --test_start YYYY-MM-DD --test_end YYYY-MM-DD [options]\n",
@@ -1966,6 +2131,9 @@ if (length(args) > 0 && any(args == "--train_start")) {
          "  --min_test_pitches N     Minimum pitches in test period (default: 10)\n",
          "  --min_total_pitches N    Minimum total pitches (default: 50)\n",
          "  --baseline_type TYPE     marginal/conditional/hybrid (default: conditional)\n",
+         "  --standardize WHICH      test/train population anchor for Deception+ (default: test)\n",
+         "  --decay N                multinom weight decay / L2 penalty (default: 1e-4)\n",
+         "  --prob_shrinkage N       prior mass mixed in before -log(p) (default: 0.02)\n",
          "  --train_game_type TYPE   R/P/S (default: R)\n",
          "  --test_game_type TYPE    R/P/S/W (default: R)\n",
          "  --out_model PATH         Output model path\n",
@@ -1990,6 +2158,9 @@ if (length(args) > 0 && any(args == "--train_start")) {
     test_level = test_level,
     split_method = split_method,
     random_seed = random_seed,
+    decay = decay,
+    prob_shrinkage = prob_shrinkage,
+    standardize = standardize,
     out_model = out_model,
     out_ppi   = out_ppi,
     verbose   = TRUE
