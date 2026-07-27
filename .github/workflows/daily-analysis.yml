@@ -18,10 +18,11 @@
 
 name: Daily Deception+ Analysis
 
+# Project is on the backburner: the daily schedule trigger is disabled below.
+# To re-enable automatic daily runs, uncomment the `schedule` block.
 on:
-  # Run at 7:00 AM UTC daily (gives Statcast time to populate after games)
-  schedule:
-    - cron: '0 7 * * *'
+  # schedule:
+  #   - cron: '0 7 * * *'  # Was: 7:00 AM UTC daily (gives Statcast time to populate after games)
 
   # Allow manual trigger with optional date override
   workflow_dispatch:
