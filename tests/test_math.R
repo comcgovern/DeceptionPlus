@@ -263,6 +263,57 @@ cat(sprintf("  Deception+ reliability on 20-pitch windows: %.3f\n", rel_d))
 ok("Surprise+ is the more reliable of the two on a single outing", rel_s > rel_d)
 ok("Surprise+ is usable at that window size", rel_s > 0.7)
 
+
+# ---------------------------------------------------------------------------
+# Sequence features. All are lags, so the boundary cases are what matter: the
+# first pitch of an appearance has no predecessor, and nothing may reach the
+# model that was only knowable after the pitch was thrown.
+# ---------------------------------------------------------------------------
+cat("\n--- lagged sequence features ---\n")
+ok("prev_description, prev_zone, last_pitch_type_2, catcher, pitcher_pitch_num exist",
+   all(c("prev_description","prev_zone","last_pitch_type_2","catcher",
+         "pitcher_pitch_num") %in% names(df)))
+
+firsts <- df %>%
+  arrange(game_pk, pitcher_id, at_bat_number, pitch_number) %>%
+  group_by(game_pk, pitcher_id) %>% slice_head(n = 1) %>% ungroup()
+ok("the first pitch of an appearance has no predecessor",
+   all(firsts$last_pitch_type == "NONE") &&
+     all(firsts$prev_description == "NONE") &&
+     all(firsts$prev_zone == "NONE") &&
+     all(firsts$pitcher_pitch_num == 1))
+
+# collapse_description() maps Statcast's vocabulary onto a compact one; a value
+# landing in OTHER would silently lose signal.
+mapped <- collapse_description(c("ball","blocked_ball","called_strike","foul",
+                                 "foul_tip","swinging_strike","swinging_strike_blocked",
+                                 "hit_into_play","hit_by_pitch"))
+ok("description collapse covers the common Statcast values",
+   !any(mapped == "OTHER"))
+ok("zone_band separates in/out/unknown",
+   identical(unname(zone_band(c(1, 5, 9, 11, 14, NA))),
+             c("IN","IN","IN","OUT","OUT","UNK")))
+
+cat("\n--- batter tendencies must come from training, not the scored window ---\n")
+# A batter who chases everything in training but nothing in the test window must
+# carry the TRAINING value into the test features; deriving it from the test
+# window uses the plate appearances being predicted.
+tr_raw <- raw[raw$game_pk <= 20, ]
+te_raw <- raw[raw$game_pk > 20, ]
+tr_raw$batter <- 999L; te_raw$batter <- 999L
+tr_raw$description <- "swinging_strike"; tr_raw$zone <- 12   # chases constantly
+te_raw$description <- "ball";            te_raw$zone <- 12   # never swings
+tr_f <- engineer_features(tr_raw, include_batter_metrics = TRUE)
+bmet <- compute_batter_metrics(tr_f)
+te_leaky <- engineer_features(te_raw, include_batter_metrics = TRUE)
+te_clean <- engineer_features(te_raw, include_batter_metrics = TRUE, batter_metrics = bmet)
+cat(sprintf("  o_swing_pct  training=%.2f  test-derived=%.2f  training-joined=%.2f\n",
+            bmet$o_swing_pct[1], te_leaky$o_swing_pct[1], te_clean$o_swing_pct[1]))
+ok("passing the training table carries training values into test features",
+   isTRUE(all.equal(te_clean$o_swing_pct[1], bmet$o_swing_pct[1])))
+ok("and that differs from what the test window would have produced",
+   abs(te_leaky$o_swing_pct[1] - te_clean$o_swing_pct[1]) > 0.5)
+
 cat("\n", if (failures == 0L) "All tests passed.\n" else
     paste0(failures, " test(s) FAILED.\n"), sep = "")
 quit(status = if (failures == 0L) 0L else 1L)

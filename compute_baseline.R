@@ -63,7 +63,8 @@ OUTPUT_FILE <- "baseline_params.rds"
 
 # Features for per-pitcher models
 FEATURE_NAMES <- c(
- "count", "outs", "is_risp", "stand", "last_pitch_type"
+ "count", "outs", "is_risp", "stand",
+ "last_pitch_type", "prev_description", "catcher"
 )
 
 # Baseline keys for simple baseline comparison

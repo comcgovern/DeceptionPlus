@@ -101,7 +101,52 @@ A multinomial logistic regression predicting pitch type from:
 - `chase_contact_pct`: Contact rate on chases
 
 #### Sequence
-- `last_pitch_type`: Previous pitch thrown in this at-bat
+- `last_pitch_type`: Previous pitch thrown (carries across plate-appearance
+  boundaries within an appearance)
+- `last_pitch_type_2`: Two pitches back
+- `prev_description`: What happened on the previous pitch, collapsed to
+  BALL / CALLED_STRIKE / WHIFF / FOUL / IN_PLAY / HBP. A slider that just drew a
+  swinging strike invites another one; the count alone does not carry that.
+- `prev_zone`: Whether the previous pitch was in or out of the strike zone
+- `pitcher_pitch_num`: Cumulative pitches in this appearance — a fatigue proxy
+
+#### Catcher
+- `catcher`: Statcast's `fielder_2`. Game-calling is a real driver of selection,
+  and a pitcher works with only a handful of catchers, so it costs few parameters.
+
+#### What Is Deliberately Excluded
+
+Every predictor must be knowable *before* release. Statcast's `release_speed`,
+`plate_x`/`plate_z`, `zone`, `description` and `events` all describe the pitch
+that was thrown; including any of them for the *current* pitch would let the model
+identify the pitch type almost perfectly and the metric would measure nothing.
+They appear only in lagged form.
+
+The batter-tendency features carry a subtler version of the same hazard. They are
+computed from the **training window only** and joined onto the test set. Deriving
+them from the test window would build a batter's chase rate partly out of the
+plate appearances being predicted, and on a one-day window would estimate it from
+a handful of pitches.
+
+#### How Many Features Can a Per-Pitcher Model Support?
+
+The daily models are fit on at most 500 pitches, which raises a fair worry that
+extra predictors will cost more in variance than they return in fit. Measured on
+synthetic pitchers whose selection genuinely depends on count, previous pitch,
+previous outcome and catcher (out-of-sample surprise in nats, lower is better):
+
+| features | n=250 | n=500 | n=1500 | n=6000 |
+|---|---|---|---|---|
+| count only | 1.3384 | 1.3263 | 1.2933 | 1.2887 |
+| + last_pitch_type | 1.2992 | 1.2770 | 1.2373 | 1.2230 |
+| + prev outcome | 1.2631 | 1.2272 | 1.1776 | 1.1583 |
+| + catcher | **1.2378** | **1.1968** | **1.1377** | **1.1220** |
+
+Every genuine signal pays for itself at every training size, including 250
+pitches — weight decay shrinks what a small sample cannot support instead of
+letting it blow up. Adding *pure noise* (eight junk numerics) costs only ~0.03
+nats at n=500. So the asymmetry favours including a plausible predictor: a real
+one is worth ~0.13 nats, a useless one costs ~0.03.
 
 **Why Multinomial Logistic Regression?**
 - Handles multiple pitch types naturally

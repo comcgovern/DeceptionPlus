@@ -126,7 +126,10 @@ shrink_to_prior <- function(P, prior, lambda = 0.02) {
 #       label-correct, so ratios centre near 1 instead of near 2.5)
 #   3 — count nests the baseline; calibration mirrors production; Surprise+ added
 #       (baseline_params.rds now needs surprise_mu / surprise_sd as well)
-BASELINE_METHOD_VERSION <- 3L
+#   4 — sequence features (prev_description, catcher, prev_zone, last_pitch_type_2,
+#       pitcher_pitch_num) and the batter-metric leak fix. A stronger model means
+#       lower model surprise, so both scales shift.
+BASELINE_METHOD_VERSION <- 4L
 
 # ---------------------- The two unpredictability scales ----------------------
 #
@@ -452,9 +455,34 @@ synthesize_pitch_type <- function(df) {
   df$pitch_type <- pt; df
 }
 
+# Collapse Statcast's ~10 `description` values into a compact outcome vocabulary.
+# Used only as a LAGGED feature: the outcome of the pitch before this one is known
+# to the pitcher; the outcome of this one obviously is not.
+collapse_description <- function(desc) {
+  d <- tolower(as.character(desc))
+  out <- rep("OTHER", length(d))
+  out[grepl("^ball|blocked_ball|pitchout", d)]      <- "BALL"
+  out[grepl("called_strike", d)]                    <- "CALLED_STRIKE"
+  out[grepl("swinging_strike|missed_bunt", d)]      <- "WHIFF"
+  out[grepl("foul", d)]                             <- "FOUL"
+  out[grepl("hit_into_play", d)]                    <- "IN_PLAY"
+  out[grepl("hit_by_pitch", d)]                     <- "HBP"
+  out[is.na(desc)]                                  <- "UNK"
+  out
+}
+
+# Coarse location band for the PREVIOUS pitch. The full 13-zone code is too many
+# levels for a per-pitcher model fit on a few hundred pitches.
+zone_band <- function(zone) {
+  z <- suppressWarnings(as.integer(zone))
+  ifelse(is.na(z), "UNK", ifelse(z >= 1L & z <= 9L, "IN", "OUT"))
+}
+
 add_last_pitch <- function(df) {
   if (!"at_bat_number" %in% names(df)) df$at_bat_number <- NA
   if (!"pitch_number" %in% names(df)) df$pitch_number <- NA
+  if (!"description" %in% names(df)) df$description <- NA_character_
+  if (!"zone" %in% names(df)) df$zone <- NA
   # Lag pitch_class, not the raw pitch_type.  pitch_class is the canonicalised
   # vocabulary the response uses (rare codes collapsed to "OTHER"); the raw
   # pitch_type carries oddities like "EP"/"PO"/"FA" that appear in the test
@@ -464,17 +492,37 @@ add_last_pitch <- function(df) {
   # Group by pitcher within each game so that the last pitch of one PA carries
   # into the first pitch of the next PA.  The old approach (grouping by at_bat_number)
   # reset to "NONE" at every PA boundary, silencing sequence context for ~50% of pitches.
+  none_if_missing <- function(x) {
+    if_else(is.na(x) | x == "" | x == "NA", "NONE", toupper(x))
+  }
+
   df %>%
-    mutate(.lag_src = lag_src) %>%
+    mutate(.lag_src   = lag_src,
+           .desc_band = collapse_description(.data$description),
+           .zone_band = zone_band(.data$zone)) %>%
     arrange(.data$game_pk, .data$pitcher_id, .data$at_bat_number, .data$pitch_number) %>%
     group_by(.data$game_pk, .data$pitcher_id) %>%
-    mutate(last_pitch_type = dplyr::lag(.data$.lag_src)) %>%
+    mutate(
+      last_pitch_type   = dplyr::lag(.data$.lag_src),
+      # Two pitches back. Sequencing is rarely first-order only; available as a
+      # feature, though it costs another full set of dummies.
+      last_pitch_type_2 = dplyr::lag(.data$.lag_src, 2),
+      # What HAPPENED on the previous pitch. Known to the pitcher before this one,
+      # and a strong driver: a slider that just got a whiff invites another.
+      prev_description  = dplyr::lag(.data$.desc_band),
+      # Where the previous pitch went, in/out of the zone.
+      prev_zone         = dplyr::lag(.data$.zone_band),
+      # Cumulative pitches in this appearance — a fatigue / deep-outing proxy.
+      pitcher_pitch_num = dplyr::row_number()
+    ) %>%
     ungroup() %>%
-    select(-".lag_src") %>%
-    mutate(last_pitch_type = if_else(
-      is.na(.data$last_pitch_type) | .data$last_pitch_type == "" | .data$last_pitch_type == "NA",
-      "NONE", toupper(.data$last_pitch_type)
-    ))
+    select(-".lag_src", -".desc_band", -".zone_band") %>%
+    mutate(
+      last_pitch_type   = none_if_missing(.data$last_pitch_type),
+      last_pitch_type_2 = none_if_missing(.data$last_pitch_type_2),
+      prev_description  = none_if_missing(.data$prev_description),
+      prev_zone         = none_if_missing(.data$prev_zone)
+    )
 }
 
 # ---------------------- Pitcher ID coalescer ---------------------------------
@@ -488,11 +536,19 @@ coalesce_pitcher_id <- function(df) {
 }
 
 # ---------------------- Feature engineering ----------------------------------
-engineer_features <- function(raw, include_batter_metrics = TRUE) {
+#' @param batter_metrics Optional pre-computed batter-tendency table (as returned
+#'   by compute_batter_metrics()). Supply the TRAINING table when engineering test
+#'   features: computing them from the test window means a batter's chase rate is
+#'   derived partly from the plate appearances being predicted, and on a one-day
+#'   window it is estimated from a handful of pitches. Left NULL, they are computed
+#'   from `raw` itself, which is only correct for the training set.
+engineer_features <- function(raw, include_batter_metrics = TRUE,
+                              batter_metrics = NULL) {
   if (is.null(raw) || nrow(raw) == 0) return(tibble())
   core <- c("game_date","game_pk","batter","pitch_type","balls","strikes",
             "outs_when_up","inning","inning_topbot","on_1b","on_2b","on_3b",
-            "home_score","away_score","stand","p_throws","description","zone")
+            "home_score","away_score","stand","p_throws","description","zone",
+            "fielder_2")
   for (nm in core) if (!nm %in% names(raw)) raw[[nm]] <- NA
   
   raw$pitcher_id <- coalesce_pitcher_id(raw)
@@ -566,8 +622,18 @@ engineer_features <- function(raw, include_batter_metrics = TRUE) {
   
   df <- add_last_pitch(df)
 
+  # Catcher identity. Game-calling is a real driver of pitch selection and a
+  # pitcher works with only a handful of catchers, so this costs few parameters.
+  # Statcast exposes the catcher as fielder_2; degrade gracefully if absent.
+  catcher_col <- dplyr::coalesce(
+    if ("fielder_2" %in% names(df)) as.character(df$fielder_2) else NA_character_,
+    if ("fielder_2_1" %in% names(df)) as.character(df$fielder_2_1) else NA_character_
+  )
+  df$catcher <- ifelse(is.na(catcher_col) | catcher_col == "", "UNK", catcher_col)
+
   if (include_batter_metrics) {
-    bmet <- compute_batter_metrics(df)
+    # Use the supplied (training) table when given; otherwise derive from `raw`.
+    bmet <- if (is.null(batter_metrics)) compute_batter_metrics(df) else batter_metrics
     df <- df %>% left_join(bmet, by = "batter") %>%
       mutate(
         o_swing_pct       = coalesce(.data$o_swing_pct, 0.5),
@@ -922,8 +988,9 @@ evaluate_per_pitcher <- function(df_history,
                                   df_test,
                                   min_train_pitches = 100,
                                   min_test_pitches = 10,
-                                  feature_names = c("count", "outs", "is_risp",
-                                                    "stand", "last_pitch_type"),
+                                  feature_names = c("count", "outs", "is_risp", "stand",
+                                                    "last_pitch_type", "prev_description",
+                                                    "catcher"),
                                   baseline_keys = c("count", "stand"),
                                   baseline_type = "conditional",
                                   baseline_alpha = 5,
@@ -1246,7 +1313,9 @@ train_ppi <- function(train_start, train_end,
                       min_total_pitches = 50,
                       feature_names = c("count","is_top","outs","score_diff","base_state","is_risp",
                                         "high_leverage","times_through_order",
-                                        "stand","p_throws","last_pitch_type",
+                                        "stand","p_throws","last_pitch_type","last_pitch_type_2",
+                                        "prev_description","prev_zone","catcher",
+                                        "pitcher_pitch_num",
                                         "o_swing_pct","z_contact_pct","swing_pct","chase_contact_pct"),
                       baseline_keys = c("count","is_risp","stand","p_throws"),
                       baseline_type = "conditional",
@@ -1394,7 +1463,13 @@ train_ppi <- function(train_start, train_end,
       } else stop("No test data found for the given range.")
     }
 
-    df_test <- engineer_features(raw_test, include_batter_metrics = needs_batter_metrics)
+    # Batter tendencies come from the TRAINING window. Recomputing them on the
+    # test window would derive a batter's chase rate partly from the very plate
+    # appearances being predicted, and would give the same batter different
+    # feature values in train and test.
+    train_bmet <- if (needs_batter_metrics) compute_batter_metrics(df_train) else NULL
+    df_test <- engineer_features(raw_test, include_batter_metrics = needs_batter_metrics,
+                                 batter_metrics = train_bmet)
     if (nrow(df_test) == 0) stop("No usable test rows after feature engineering.")
     df_test <- df_test %>% filter(!is.na(pitcher_id))
 
@@ -1678,7 +1753,9 @@ train_and_save <- function(train_start, train_end,
                            min_total_pitches = 50,
                            feature_names = c("count","is_top","outs","score_diff","base_state","is_risp",
                                              "high_leverage","times_through_order",
-                                             "stand","p_throws","last_pitch_type",
+                                             "stand","p_throws","last_pitch_type","last_pitch_type_2",
+                                             "prev_description","prev_zone","catcher",
+                                             "pitcher_pitch_num",
                                              "o_swing_pct","z_contact_pct","swing_pct","chase_contact_pct"),
                            baseline_keys = c("count","is_risp","stand","p_throws"),
                            baseline_type = "conditional",
@@ -2294,7 +2371,7 @@ if (length(args) > 0 && any(args == "--train_start")) {
   min_total <- suppressWarnings(as.integer(get_arg("--min_total_pitches", "50")))
   out_model <- get_arg("--out_model", "models/ppi_model.rds")
   out_ppi   <- get_arg("--out_ppi", "output/pitcher_ppi.csv")
-  feat_str  <- get_arg("--features", "count,is_top,outs,score_diff,base_state,is_risp,high_leverage,times_through_order,stand,p_throws,last_pitch_type,o_swing_pct,z_contact_pct,swing_pct,chase_contact_pct")
+  feat_str  <- get_arg("--features", "count,is_top,outs,score_diff,base_state,is_risp,high_leverage,times_through_order,stand,p_throws,last_pitch_type,last_pitch_type_2,prev_description,prev_zone,catcher,pitcher_pitch_num,o_swing_pct,z_contact_pct,swing_pct,chase_contact_pct")
   base_str  <- get_arg("--baseline_keys", "count,is_risp,stand,p_throws")
   baseline_type <- get_arg("--baseline_type", "conditional")
   train_game_type <- get_arg("--train_game_type", "R")

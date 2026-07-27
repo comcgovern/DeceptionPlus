@@ -143,9 +143,19 @@ We train a multinomial logistic regression model to predict pitch type using:
 - **Count state**: the joint count as a 12-level factor (`0-0` … `3-2`), not two
   numeric terms — 3-0 and 0-2 are not two steps along one axis
 - **Game situation**: inning, outs, runners on base, score differential
-- **Batter context**: handedness, chase rate, contact tendencies
-- **Sequence**: previous pitch thrown
+- **Batter context**: handedness, chase rate, contact tendencies (computed from
+  the *training* window only)
+- **Sequence**: previous pitch type, what happened on it (ball / called strike /
+  whiff / foul / in play), where it was located (in or out of the zone), and the
+  pitch two back
+- **Catcher**: who was calling the game
+- **Workload**: pitch number within the appearance
 - **Times through order**: how often batter has faced this pitcher today
+
+Every predictor is something known *before* the pitch is released. Statcast
+fields describing the pitch itself — velocity, movement, location, outcome — are
+deliberately excluded: they would predict the pitch type nearly perfectly and
+measure nothing.
 
 ### 2. Surprise Calculation
 
