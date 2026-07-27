@@ -51,6 +51,12 @@ exclusion, which is part of why it reads more naturally.
 
 Initial validation shows meaningful correlations with pitcher performance. Higher Deception+ for starters (1500+ pitches in a season) is associated with a lower xFIP and SIERA and a higher swinging strike rate and strikeout rate.
 
+> **Not yet revalidated.** These correlations were measured before a substantial
+> correction to the scoring pipeline — predicted probabilities were being matched to the
+> wrong pitch classes, which distorted the scores they were computed from. Treat them as
+> prior expectations rather than current findings until they are recomputed against a
+> regenerated baseline.
+
 This suggests there's strategic value in unpredictability, not just randomness, though there's also a lot of noise there. The effect exists even after controlling for pitch quality metrics.
 
 Unpredictability appears to matter most when:

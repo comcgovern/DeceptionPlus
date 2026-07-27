@@ -82,11 +82,13 @@ A multinomial logistic regression predicting pitch type from:
 - `two_strikes`, `ahead_in_count`: retained as engineered columns, but redundant
   once `count` is in the model (both are exact functions of it) and no longer in
   the default feature set
-- `outs`: Current outs (0, 1, 2)
-- `inning`: Which inning (treated as categorical, not continuous)
-- `score_diff`: Home score - away score
-- `high_leverage`: Late inning + close game indicator
-- `n_thruorder_pitcher`: Times through the order (from Statcast)
+- `outs`: Current outs, as a 3-level factor
+- `is_top`: Top or bottom of the inning
+- `score_diff`: Score from the **pitcher's** perspective (positive = his team leads)
+- `high_leverage`: Late inning + close game indicator (derived from `inning`;
+  `inning` itself is not a model feature)
+- `times_through_order`: Times through the order, engineered from Statcast's
+  `n_thruorder_pitcher`
 
 #### Base-Out State
 - `base_state`: 8 possible configurations (empty, runner on 1st, 2nd, 3rd, 1st+2nd, 1st+3rd, 2nd+3rd, loaded)
@@ -163,12 +165,13 @@ Could we use fancier models (random forests, neural networks)?
 ### Baseline Model (Simple)
 
 The baseline model uses only:
-- `balls`, `strikes`: Count state
+- `count`: Count state, as the same 12-level factor the full model uses
 - `is_risp`: Runner in scoring position
 - `stand`, `p_throws`: Handedness matchup
-- `two_strikes`: Two-strike indicator
 
 This captures basic situational tendencies without deep context or sequencing.
+Both models must represent the count identically — see *The Model Must Nest the
+Baseline*.
 
 **Three Baseline Options:**
 
@@ -342,11 +345,13 @@ Raw model surprise is ~64% arsenal size by R²; normalised, ~27%.
 
 ### Which to use
 
-- **Surprise+** for anything at outing or short-window scale — the daily
-  leaderboards, the social graphics, single-game analysis.
-- **Deception+** for season-scale work, where it reaches 0.79 reliability and is
-  the more interesting quantity: it isolates *pattern-breaking* from *arsenal
-  diversity* in a way Surprise+ does not.
+- **Surprise+** (column `surprise_plus`, from `normed_surprise`) for anything at
+  outing or short-window scale — the daily leaderboards, the social graphics,
+  single-game analysis.
+- **Deception+** (column `deception_plus`, from `unpredictability_ratio`) for
+  season-scale work, where it reaches 0.79 reliability and is the more interesting
+  quantity: it isolates *pattern-breaking* from *arsenal diversity* in a way
+  Surprise+ does not.
 
 They are not redundant and they disagree. Across archetypes, Spearman between raw
 absolute surprise and the ratio is about −0.3 — they are close to unrelated. Report
@@ -462,30 +467,31 @@ We train on one period and evaluate on another to:
 
 The system supports three modes:
 
-1. **Same period** (`test_days` parameter):
+1. **Separate periods** (most common):
    ```r
-   start_date = "2025-03-01"
-   end_date = "2025-09-30"
-   test_days = 30
-   # Train: Mar 1 - Aug 31
-   # Test: Sep 1 - Sep 30
+   train_start = "2025-03-01"
+   train_end   = "2025-08-31"
+   test_start  = "2025-09-01"
+   test_end    = "2025-09-30"
    ```
 
-2. **Explicit periods** (can overlap):
+2. **Overlapping periods** (test partly inside train):
    ```r
-   train_start_date = "2025-03-01"
-   train_end_date = "2025-09-30"
-   test_start_date = "2025-08-01"  # Overlaps!
-   test_end_date = "2025-09-30"
+   train_start = "2025-03-01"
+   train_end   = "2025-09-30"
+   test_start  = "2025-08-01"   # Overlaps — scores are partly in-sample
+   test_end    = "2025-09-30"
    ```
 
-3. **Separate periods** (most common):
+3. **Random split** (no dates; 50/50 per pitcher over one period):
    ```r
-   train_start_date = "2025-03-01"
-   train_end_date = "2025-09-30"
-   test_start_date = "2025-10-01"  # Playoffs
-   test_end_date = "2025-11-05"
+   train_start  = "2025-03-01"
+   train_end    = "2025-09-30"
+   split_method = "random"
+   random_seed  = 42
    ```
+
+There is no `test_days` argument; the period is always given explicitly.
 
 ### Handling Test Period Pitchers Not in Training
 
@@ -637,10 +643,12 @@ Two mitigations, applied together:
 Similar process with simpler model or frequency table:
 
 ```r
-# For conditional baseline
-P_baseline <- conditional_freq_table[count_situation_cells, pitch_types]
+# For conditional baseline — note the IDENTICAL shrinkage applied to the model
+# above, so numerator and denominator of the ratio share a probability floor.
+P_baseline <- compute_baseline_probs(training_data, test_data)
+P_baseline <- shrink_to_prior(P_baseline, class_prior(training_data$pitch_class, classes))
 p_actual_baseline <- P_baseline[cbind(1:nrow(test_data), idx_actual)]
-surprise_baseline <- -log(pmax(p_actual_baseline, 1e-12))
+surprise_baseline <- -log(pmax(p_actual_baseline, 1e-9))
 ```
 
 ### Aggregation to Pitcher Level
@@ -665,6 +673,9 @@ pitcher_stats <- test_data %>%
 ## Validation and Interpretation
 
 ### Correlations with Performance
+
+These relationships predate the scoring corrections described above and have not been
+revalidated; the directions below are prior expectations, not current findings.
 
 Negative correlation with xFIP means: higher Deception+ → lower xFIP → better performance.
 Positive correlation with SwStr% means: higher Deception+ → more swinging strikes.

@@ -10,6 +10,10 @@
 #   3. Evaluate today's pitches against their own model
 #   4. Standardize using fixed baseline (baseline_params.rds)
 #
+# Two scales are published. Rankings and graphics sort on Surprise+, which holds
+# up over a single outing; Deception+ is reported alongside but is a season-scale
+# statistic. See METHODOLOGY.md, "Two Scales".
+#
 # Outputs are committed back to the repository in:
 #   output/{year}/{month}/{day}.csv
 #   output/{year}/{month}/orioles_{day}.csv
@@ -262,7 +266,7 @@ jobs:
               ORIOLES_CSV="output/${YEAR}/${MONTH}/orioles_${DAY}.csv"
 
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Baltimore Orioles Pitcher Deception+ Scores (≥ 10 pitches)" >> $GITHUB_STEP_SUMMARY
+              echo "### Baltimore Orioles Pitcher Scores (≥ 10 pitches)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
 
               if [ -f "$ORIOLES_CSV" ]; then
