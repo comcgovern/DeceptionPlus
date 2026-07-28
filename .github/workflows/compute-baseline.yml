@@ -34,22 +34,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check if baseline already exists
-        id: check
-        run: |
-          if [ -f "baseline_params.rds" ] && [ "${{ github.event.inputs.force_recompute }}" != "true" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "baseline_params.rds already exists. Use force_recompute=true to regenerate."
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Setup R
-        if: steps.check.outputs.skip == 'false'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: '4.3.0'
           use-public-rspm: true
+
+      # Runs after Setup R so it can read the stored method_version. A baseline
+      # written by an older scoring version encodes a scale the current code no
+      # longer produces, so "the file exists" is not a reason to skip — it is a
+      # reason to regenerate. The previous check skipped on existence alone, and
+      # since baseline_params.rds is committed, that made every run a silent
+      # no-op unless force_recompute was ticked.
+      - name: Check whether the baseline needs recomputing
+        id: check
+        run: |
+          REQUIRED=$(Rscript -e 'cat(sub("L$", "", regmatches(x <- readLines("pitch_ppi.R"), regexpr("(?<=BASELINE_METHOD_VERSION <- )[0-9]+L", x, perl = TRUE))[1]))')
+          echo "Current scoring method version: ${REQUIRED}"
+
+          if [ "${{ github.event.inputs.force_recompute }}" = "true" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "force_recompute requested."
+          elif [ ! -f "baseline_params.rds" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "No baseline_params.rds present."
+          else
+            FOUND=$(Rscript -e 'p <- readRDS("baseline_params.rds"); v <- p$method_version; cat(if (is.null(v)) 1L else v)')
+            HAS_SURPRISE=$(Rscript -e 'p <- readRDS("baseline_params.rds"); cat(as.integer(!is.null(p$surprise_mu) && !is.null(p$surprise_sd)))')
+            echo "Stored version: ${FOUND} (Surprise+ anchor present: ${HAS_SURPRISE})"
+            if [ "${FOUND}" -lt "${REQUIRED}" ] || [ "${HAS_SURPRISE}" != "1" ]; then
+              echo "skip=false" >> $GITHUB_OUTPUT
+              echo "Baseline is stale -> recomputing."
+            else
+              echo "skip=true" >> $GITHUB_OUTPUT
+              echo "Baseline is current. Use force_recompute=true to regenerate anyway."
+            fi
+          fi
 
       - name: Install system dependencies
         if: steps.check.outputs.skip == 'false'

@@ -14,16 +14,48 @@ Traditional scouting tells us that unpredictability matters. Hitters and scoutin
 
 Deception+ uses an information-theoretic approach: we train a multinomial logistic regression model on each pitcher's historical data, including game context (count, outs, runners, batter handedness, previous pitch), and then measure how "surprised" the model is by the pitcher's actual choices. We compare this surprise against a baseline model to isolate genuine unpredictability from simple pitch mix diversity.
 
-The metric is **scaled to 100 (league average) with a standard deviation of 10**:
-- **110 or higher: Highly unpredictable** — consistently defies pattern recognition
-- **100: League average** — predictable in typical ways  
-- **90 or lower: Highly predictable** — follows recognizable patterns
+### Two metrics, two questions
+
+There are two honest ways to ask "is this pitcher unpredictable," and they don't
+give the same answer. Both are reported, both scaled to **100 = league average,
+SD = 10**.
+
+| | **Surprise+** | **Deception+** |
+|---|---|---|
+| Asks | Of all the uncertainty this pitcher's arsenal *could* create, how much survives once you know the situation? | Does this pitcher defy prediction *beyond* what the count and handedness already give away? |
+| Built from | model surprise ÷ log(arsenal size) | model surprise ÷ baseline surprise |
+| 110+ | next pitch is near a coin flip among their offerings | breaks patterns a situational model can't learn |
+| 90− | the situation gives the pitch away | textbook, situation-driven selection |
+| Rewards big arsenals? | barely (R² ≈ 0.27 vs pitch-type count) | no (R² ≈ 0.03) |
+| **Usable on one outing?** | **yes** (reliability ≈ 0.92 at 20 pitches) | **no** (≈ 0.16 at 20 pitches; ≈ 0.79 at 1500) |
+
+The difference in that last row is the important one. Deception+ is the more
+conceptually pure measure — it is almost perfectly independent of how many pitches
+you throw, which is why a two-pitch reliever can top it. But it is a **season-scale
+statistic**: on a single 20-pitch outing roughly five-sixths of its spread is
+estimation noise, so ranking one day by it ranks noise.
+
+So: **daily leaderboards and graphics sort on Surprise+; Deception+ is the
+season-level number.** Both appear in every output file. Run
+`Rscript scripts/compare_metrics.R` to reproduce these figures, or
+`--real <season>` to check them against your own cached data.
+
+A note on what Deception+ deliberately *excludes*: because its baseline already
+knows the count, a pitcher whose only tell is count-based is scored as average —
+that predictability is controlled away rather than counted. Surprise+ has no such
+exclusion, which is part of why it reads more naturally.
 
 🧢 [**See the 2025 regular season data here!**](https://public.tableau.com/app/profile/mcgov36/viz/Predict2025/SingleDash)
 
 ## Why It Matters
 
 Initial validation shows meaningful correlations with pitcher performance. Higher Deception+ for starters (1500+ pitches in a season) is associated with a lower xFIP and SIERA and a higher swinging strike rate and strikeout rate.
+
+> **Not yet revalidated.** These correlations were measured before a substantial
+> correction to the scoring pipeline — predicted probabilities were being matched to the
+> wrong pitch classes, which distorted the scores they were computed from. Treat them as
+> prior expectations rather than current findings until they are recomputed against a
+> regenerated baseline.
 
 This suggests there's strategic value in unpredictability, not just randomness, though there's also a lot of noise there. The effect exists even after controlling for pitch quality metrics.
 
@@ -52,14 +84,15 @@ devtools::install_github("saberpowers/sabRmetrics")
 source("pitch_ppi.R")
 
 # Analyze 2025 regular season
-# Train on full season, evaluate last 30 days
+# Train on Mar-Aug, evaluate September
 result <- train_and_save(
-  start_date = "2025-03-01",
-  end_date = "2025-09-30",
-  test_days = 30,
+  train_start = "2025-03-01",
+  train_end   = "2025-08-31",
+  test_start  = "2025-09-01",
+  test_end    = "2025-09-30",
   min_total_pitches = 50,
-  out_model = "ppi_model.rds",
-  out_ppi = "pitcher_ppi.csv"
+  out_model = "models/ppi_model.rds",
+  out_ppi   = "output/pitcher_ppi.csv"
 )
 
 # View top unpredictable pitchers
@@ -73,23 +106,37 @@ You can train and test on any periods — same, overlapping, or separate:
 ```r
 # Train on regular season, test on playoffs
 result <- train_ppi(
-  start_date = "2025-03-01",      # Training period
-  end_date = "2025-09-30",
-  test_days = NULL,                # Use explicit test period instead
-  test_start_date = "2025-10-01",  # Test period
-  test_end_date = "2025-11-05"
+  train_start = "2025-03-01",      # Training period
+  train_end   = "2025-09-30",
+  test_start  = "2025-10-01",      # Test period
+  test_end    = "2025-11-05",
+  test_game_type = "P"             # R = regular season, P = playoffs, W = World Series
+)
+```
+
+Or split one period at random instead of by date:
+
+```r
+result <- train_ppi(
+  train_start  = "2025-03-01",
+  train_end    = "2025-09-30",
+  split_method = "random",         # 50/50 per pitcher; test dates are ignored
+  random_seed  = 42
 )
 ```
 
 ### AAA Analysis
 
 ```r
-# Analyze Triple-A data
+# Analyze Triple-A data. Level (MLB/AAA) and game_type (R/P/S/W) are separate
+# knobs — game_type selects regular season vs. playoffs, not the league.
 result <- train_and_save(
-  start_date = "2025-04-01",
-  end_date = "2025-09-15",
-  game_type = "AAA",               # Use AAA instead of MLB
-  test_days = 30,
+  train_start = "2025-04-01",
+  train_end   = "2025-08-15",
+  test_start  = "2025-08-16",
+  test_end    = "2025-09-15",
+  train_level = "AAA",
+  test_level  = "AAA",
   min_total_pitches = 50
 )
 ```
@@ -99,11 +146,22 @@ result <- train_and_save(
 ### 1. Model Training
 
 We train a multinomial logistic regression model to predict pitch type using:
-- **Count state**: balls, strikes, ahead/behind in count
+- **Count state**: the joint count as a 12-level factor (`0-0` … `3-2`), not two
+  numeric terms — 3-0 and 0-2 are not two steps along one axis
 - **Game situation**: inning, outs, runners on base, score differential
-- **Batter context**: handedness, chase rate, contact tendencies
-- **Sequence**: previous pitch thrown
+- **Batter context**: handedness, chase rate, contact tendencies (computed from
+  the *training* window only)
+- **Sequence**: previous pitch type, what happened on it (ball / called strike /
+  whiff / foul / in play), where it was located (in or out of the zone), and the
+  pitch two back
+- **Catcher**: who was calling the game
+- **Workload**: pitch number within the appearance
 - **Times through order**: how often batter has faced this pitcher today
+
+Every predictor is something known *before* the pitch is released. Statcast
+fields describing the pitch itself — velocity, movement, location, outcome — are
+deliberately excluded: they would predict the pitch type nearly perfectly and
+measure nothing.
 
 ### 2. Surprise Calculation
 
@@ -116,6 +174,19 @@ We compare the full model's surprise against a simpler **baseline model** that u
 **Unpredictability Ratio** = Model Surprise / Baseline Surprise
 
 Ratios > 1 mean the pitcher remains unpredictable even when accounting for game context. Ratios < 1 mean situational patterns explain most pitch selection.
+
+For that reading to hold, the full model has to be able to reproduce the baseline —
+otherwise a ratio above 1 can just mean the full model is the weaker of the two.
+The baseline is a saturated cross-tab over count and handedness, so those must
+reach the full model as factors. See
+[METHODOLOGY.md](METHODOLOGY.md#the-model-must-nest-the-baseline).
+
+Note also what the baseline *removes*: because it already knows the count, a
+pitch pattern driven by the count is controlled away rather than counted as
+predictability. Deception+ measures unpredictability **beyond count and
+handedness**, not in absolute terms. A pitcher whose tells live in outs, base
+state, or sequencing moves the score sharply; one whose tells are purely
+count-based moves it much less.
 
 ### 4. Standardization
 
@@ -142,38 +213,81 @@ The main output (`pitcher_ppi.csv`) includes:
 | `mean_surp_base` | Average surprise from baseline model |
 | `ppi` | Pitch Predictability Index (1 - ratio, range: -1 to 1) |
 | `unpredictability_ratio` | Model surprise / baseline surprise |
-| `deception_plus` | Scaled metric (mean=100, SD=10) |
+| `surp_excess` | Model surprise **minus** baseline surprise, in nats. Same comparison as the ratio on a difference scale. Prefer it when the baseline surprise is small: for a pitcher who throws one pitch 99% of the time, both surprises are near zero and their *ratio* swings wildly on rounding-level differences, while the difference correctly reports "no meaningful gap." |
+| `n_classes` | Size of that pitcher's pitch vocabulary |
+| `normed_surprise` | Model surprise ÷ log(`n_classes`) — the raw input to Surprise+. ~1.0 means the next pitch is close to a coin flip among their own offerings. |
+| `deception_plus` | **Deception+**: scaled `unpredictability_ratio` (mean=100, SD=10). Season-scale — see the two-metric table above. |
+| `surprise_plus` | **Surprise+**: scaled `normed_surprise` (mean=100, SD=10). Reliable on a single outing; this is what the daily rankings sort on. |
+
+The daily output additionally carries `role` and `status`. Rows with a `status`
+other than `evaluated` are pitchers who appeared but could not be scored — a debut
+with no history, too little history, or too few pitches on the day — and their
+metric columns are intentionally blank.
 
 ## Advanced Usage
 
 ### Custom Features
 
 ```r
-# Specify which features to include
+# Specify which features to include.
+# Note: the engineered feature is `times_through_order` — `n_thruorder_pitcher`
+# is the raw Statcast column it is derived from and is not a model feature.
 result <- train_and_save(
-  start_date = "2025-03-01",
-  end_date = "2025-09-30",
-  feature_names = c("balls", "strikes", "two_strikes", "ahead_in_count",
-                    "high_leverage", "n_thruorder_pitcher", "outs",
+  train_start = "2025-03-01",
+  train_end   = "2025-08-31",
+  test_start  = "2025-09-01",
+  test_end    = "2025-09-30",
+  feature_names = c("count", "high_leverage", "times_through_order", "outs",
                     "score_diff", "base_state", "is_risp",
                     "stand", "p_throws", "last_pitch_type",
                     "o_swing_pct", "z_contact_pct", "swing_pct"),
-  baseline_keys = c("balls", "strikes", "is_risp", "stand", "p_throws")
+  baseline_keys = c("count", "is_risp", "stand", "p_throws")
 )
 ```
+
+`count` is the joint 12-level count factor (`0-0` … `3-2`). Prefer it over
+separate numeric `balls` and `strikes`: the conditional baseline is a saturated
+cross-tab over its keys, so a model that is merely *linear* in balls and strikes
+is less expressive than the baseline it is scored against, and the ratio then
+rises with predictability instead of falling. `check_baseline_nesting()` warns if
+your feature set and baseline keys fall into that trap.
+
+```r
+# This configuration warns — 'balls'/'strikes' cell the baseline but reach the
+# model as numerics, so the comparison is not apples to apples.
+train_and_save(..., feature_names = c("balls","strikes",...),
+                    baseline_keys = c("balls","strikes","stand"))
+```
+
+### Scoring Controls
+
+Three parameters govern how probabilities become surprise. The defaults are
+sane; change them only if you know why.
+
+| Parameter | Default | What it does |
+|-----------|---------|--------------|
+| `decay` | `1e-4` seasonal, `0.01` per-pitcher | Weight decay (L2 penalty) on the multinomial fit. Small per-pitcher samples separate easily; without a penalty the fit emits probabilities of 0 and 1 and `-log(p)` stops measuring surprise. |
+| `prob_shrinkage` | `0.02` | Prior mass mixed into predicted probabilities before `-log()`. Keeps model and baseline surprise on the same floor so their ratio stays meaningful. |
+| `standardize` | `"test"` | Population whose μ/σ anchor the Deception+ scale. `"test"` makes the output actually have mean 100 / SD 10. `"train"` gives a test-period-independent anchor but is measured in-sample and therefore optimistically biased. |
+| `baseline_alpha` | `5` | Pseudo-count mass smoothing the baseline's conditional cells toward the marginal pitch mix. It sits in the denominator of every score; picked by held-out likelihood the optimum is ~2 and the curve is flat from 1 to 5. |
 
 ### Command Line
 
 ```bash
 Rscript pitch_ppi.R \
-  --start 2025-03-01 \
-  --end 2025-09-30 \
-  --test_days 30 \
+  --train_start 2025-03-01 \
+  --train_end   2025-08-31 \
+  --test_start  2025-09-01 \
+  --test_end    2025-09-30 \
   --min_total_pitches 50 \
-  --game_type R \
-  --out_model ppi_model.rds \
-  --out_ppi pitcher_ppi.csv
+  --train_game_type R \
+  --test_game_type R \
+  --out_model models/ppi_model.rds \
+  --out_ppi   output/pitcher_ppi.csv
 ```
+
+Run with no arguments to see the full option list, including `--split_method`,
+`--baseline_type`, `--standardize`, `--decay` and `--prob_shrinkage`.
 
 ## Data Sources
 
@@ -182,6 +296,18 @@ Rscript pitch_ppi.R \
 - **Pitcher names**: MLB Stats API with local caching
 
 ## Technical Notes
+
+### Standardization Baseline (`baseline_params.rds`)
+
+The daily pipeline standardizes against fixed μ/σ stored in `baseline_params.rds`,
+so that a score means the same thing on Tuesday as it did in April. That file is
+produced by `compute_baseline.R` (or the `compute-baseline` workflow) and is
+stamped with a `method_version`.
+
+> **Re-run `compute_baseline.R` after any change to the scoring math.** μ and σ
+> define the entire Deception+ scale, so standardizing new ratios against an old
+> file shifts every published score. `run_daily.R` checks the stamp and warns
+> loudly rather than failing silently, but it cannot fix the scale for you.
 
 ### Baseline Selection
 

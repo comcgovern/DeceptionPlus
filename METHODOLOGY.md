@@ -77,14 +77,18 @@ Deception+ uses *conditional* surprise from an actual predictive model, then com
 A multinomial logistic regression predicting pitch type from:
 
 #### Game Context
-- `balls`, `strikes`: Current count
-- `two_strikes`: Binary indicator for 2-strike counts
-- `ahead_in_count`: Binary indicator for hitter-favorable counts
-- `outs`: Current outs (0, 1, 2)
-- `inning`: Which inning (treated as categorical, not continuous)
-- `score_diff`: Home score - away score
-- `high_leverage`: Late inning + close game indicator
-- `n_thruorder_pitcher`: Times through the order (from Statcast)
+- `count`: The joint count state as a 12-level factor (`0-0` … `3-2`). Modeled
+  jointly, not as two numeric terms — see *The Model Must Nest the Baseline*.
+- `two_strikes`, `ahead_in_count`: retained as engineered columns, but redundant
+  once `count` is in the model (both are exact functions of it) and no longer in
+  the default feature set
+- `outs`: Current outs, as a 3-level factor
+- `is_top`: Top or bottom of the inning
+- `score_diff`: Score from the **pitcher's** perspective (positive = his team leads)
+- `high_leverage`: Late inning + close game indicator (derived from `inning`;
+  `inning` itself is not a model feature)
+- `times_through_order`: Times through the order, engineered from Statcast's
+  `n_thruorder_pitcher`
 
 #### Base-Out State
 - `base_state`: 8 possible configurations (empty, runner on 1st, 2nd, 3rd, 1st+2nd, 1st+3rd, 2nd+3rd, loaded)
@@ -99,7 +103,52 @@ A multinomial logistic regression predicting pitch type from:
 - `chase_contact_pct`: Contact rate on chases
 
 #### Sequence
-- `last_pitch_type`: Previous pitch thrown in this at-bat
+- `last_pitch_type`: Previous pitch thrown (carries across plate-appearance
+  boundaries within an appearance)
+- `last_pitch_type_2`: Two pitches back
+- `prev_description`: What happened on the previous pitch, collapsed to
+  BALL / CALLED_STRIKE / WHIFF / FOUL / IN_PLAY / HBP. A slider that just drew a
+  swinging strike invites another one; the count alone does not carry that.
+- `prev_zone`: Whether the previous pitch was in or out of the strike zone
+- `pitcher_pitch_num`: Cumulative pitches in this appearance — a fatigue proxy
+
+#### Catcher
+- `catcher`: Statcast's `fielder_2`. Game-calling is a real driver of selection,
+  and a pitcher works with only a handful of catchers, so it costs few parameters.
+
+#### What Is Deliberately Excluded
+
+Every predictor must be knowable *before* release. Statcast's `release_speed`,
+`plate_x`/`plate_z`, `zone`, `description` and `events` all describe the pitch
+that was thrown; including any of them for the *current* pitch would let the model
+identify the pitch type almost perfectly and the metric would measure nothing.
+They appear only in lagged form.
+
+The batter-tendency features carry a subtler version of the same hazard. They are
+computed from the **training window only** and joined onto the test set. Deriving
+them from the test window would build a batter's chase rate partly out of the
+plate appearances being predicted, and on a one-day window would estimate it from
+a handful of pitches.
+
+#### How Many Features Can a Per-Pitcher Model Support?
+
+The daily models are fit on at most 500 pitches, which raises a fair worry that
+extra predictors will cost more in variance than they return in fit. Measured on
+synthetic pitchers whose selection genuinely depends on count, previous pitch,
+previous outcome and catcher (out-of-sample surprise in nats, lower is better):
+
+| features | n=250 | n=500 | n=1500 | n=6000 |
+|---|---|---|---|---|
+| count only | 1.3384 | 1.3263 | 1.2933 | 1.2887 |
+| + last_pitch_type | 1.2992 | 1.2770 | 1.2373 | 1.2230 |
+| + prev outcome | 1.2631 | 1.2272 | 1.1776 | 1.1583 |
+| + catcher | **1.2378** | **1.1968** | **1.1377** | **1.1220** |
+
+Every genuine signal pays for itself at every training size, including 250
+pitches — weight decay shrinks what a small sample cannot support instead of
+letting it blow up. Adding *pure noise* (eight junk numerics) costs only ~0.03
+nats at n=500. So the asymmetry favours including a plausible predictor: a real
+one is worth ~0.13 nats, a useless one costs ~0.03.
 
 **Why Multinomial Logistic Regression?**
 - Handles multiple pitch types naturally
@@ -116,12 +165,13 @@ Could we use fancier models (random forests, neural networks)?
 ### Baseline Model (Simple)
 
 The baseline model uses only:
-- `balls`, `strikes`: Count state
+- `count`: Count state, as the same 12-level factor the full model uses
 - `is_risp`: Runner in scoring position
 - `stand`, `p_throws`: Handedness matchup
-- `two_strikes`: Two-strike indicator
 
 This captures basic situational tendencies without deep context or sequencing.
+Both models must represent the count identically — see *The Model Must Nest the
+Baseline*.
 
 **Three Baseline Options:**
 
@@ -137,6 +187,74 @@ This captures basic situational tendencies without deep context or sequencing.
 3. **Hybrid**: Conditional when possible, marginal fallback
    - Robust to sparse data
    - Recommended for most uses
+
+**Smoothing.** Conditional cells are smoothed by backing off toward the pitcher's
+marginal mix rather than toward a uniform distribution:
+
+```
+P(class | cell) = (n_cell,class + α · P_marginal(class)) / (n_cell + α)
+```
+
+The distinction is not cosmetic. Plain add-one smoothing puts a pseudo-count on
+*every* class, so a cell holding four real pitches from an eight-pitch vocabulary
+is two-thirds prior — and that prior asserts the pitcher is equally likely to
+throw all eight, which is never true. It inflates baseline surprise in proportion
+to arsenal size, and since Deception+ divides by baseline surprise, it quietly
+rewarded deep arsenals. Backing off to the marginal mix removes that dependence
+and converges on the raw cell frequencies as cells fill.
+
+Cells absent from the training window fall back to the marginal mix as well.
+(A uniform `1/K` fallback charges ~log K nats of baseline surprise for a context
+the baseline simply never encountered — arbitrary, and it deflates the ratio.)
+
+`baseline_alpha` sits directly in the denominator of every score, so over-smoothing
+the baseline would make the model look good for free. Chosen by held-out likelihood
+of the baseline on its own, the optimum is around 2 and the curve is flat from 1 to
+5 (α=5 costs 0.003 nats/pitch against the optimum) before degrading sharply past
+20. The default of 5 is inside the flat region; it is exposed as a parameter so the
+sensitivity can be re-checked on real data.
+
+### The Model Must Nest the Baseline
+
+Deception+ reads a ratio above 1 as *"the full model, despite knowing strictly
+more, is still surprised — this pitcher is unpredictable."* That inference is only
+valid if the full model can actually reproduce the baseline. Otherwise a ratio
+above 1 may just mean the full model is the weaker of the two.
+
+It was. The conditional baseline is a **saturated cross-tab** over its keys — it
+can represent any function of the count. The full model had `balls` and `strikes`
+as separate *numeric* terms, making it linear in the logit and unable to represent
+one. Count effects are famously non-monotone; asked to fit a 95% fastball rate on
+3-0 alongside 25% on 0-2, a linear-in-count model returns:
+
+| count | true | linear in balls+strikes | `count` factor |
+|-------|------|------------------------|----------------|
+| 3-0   | 0.95 | 0.77                   | 0.94           |
+| 0-2   | 0.25 | 0.29                   | 0.23           |
+| 1-2   | 0.25 | 0.36                   | 0.24           |
+
+So the "simple" baseline beat the "sophisticated" model on exactly the dimension
+the baseline conditions on, and the harder a pitcher leaned on count patterns the
+*more deceptive* the metric called them. On synthetic pitchers whose count-
+determinism rises left to right:
+
+```
+numeric balls/strikes:  0.988  1.031  1.231  1.299   <- rises with predictability
+joint `count` factor :  0.997  1.001  0.995  1.006   <- flat, as it should be
+```
+
+Hence the joint `count` factor on both sides. The general rule, enforced by
+`check_baseline_nesting()`, which warns when it is violated:
+
+> Every baseline key must reach the full model in a form at least as flexible as
+> the baseline's — as a factor, or as something with at most two values.
+
+Note what "flat" means here: when a pattern lives in something the baseline also
+sees, it is *controlled away* rather than counted as predictability. That is the
+point of having a baseline. Deception+ measures unpredictability **beyond count
+and handedness**, not in absolute terms. A pitcher whose pattern lives somewhere
+the baseline is blind to — outs, base state, sequencing — still moves the score
+sharply (ratio 1.00 → 0.01 across the same sweep).
 
 ### The Comparison
 
@@ -181,6 +299,74 @@ The ratio isolates genuine unpredictability from:
 
 What remains is **situational independence** — pitchers who don't follow learnable patterns even when we account for context.
 
+## Two Scales: Deception+ and Surprise+
+
+The surprise-ratio construction above answers a specific question — *does context
+beyond count and handedness help predict this pitcher?* — and answers it well. It
+is almost perfectly independent of arsenal size (R² against pitch-type count ≈
+0.03), which is what allows a two-pitch reliever to rank above a five-pitch
+starter.
+
+What it cannot do is support a one-day ranking. Reliability — between-pitcher
+variance as a share of total variance, over repeated independent test windows —
+measures how much of an ordering is real:
+
+| test window | Surprise+ input | Deception+ input |
+|---|---|---|
+| 20 pitches (a typical outing) | 0.92 | **0.16** |
+| 100 pitches | 0.98 | 0.27 |
+| 1500 pitches (a season) | 1.00 | 0.79 |
+
+The ratio is a season-scale statistic. On a single outing roughly five-sixths of
+its spread is estimation noise: both numerator and denominator are means over ~20
+pitches, and dividing one noisy small number by another compounds the error rather
+than cancelling it.
+
+**Surprise+** measures the same underlying object without the division:
+
+```
+normed_surprise = mean_surp_model / log(n_classes)
+```
+
+Model surprise as a share of the most a given arsenal could deliver. ~1.0 means
+the next pitch is close to a coin flip among that pitcher's own offerings; 0.3
+means three-quarters of the uncertainty is gone once you know the situation.
+
+Normalising by `log(n_classes)` rather than reporting raw nats is what makes it
+comparable across arsenals. On synthetic pitchers who are equally unpredictable
+with 2, 3, 4 and 5 pitch types:
+
+```
+raw surprise    :  0.705  1.113  1.394  1.658    <- 2.4x spread, all arsenal size
+normed surprise :  1.018  1.013  1.006  1.030    <- flat
+```
+
+Raw model surprise is ~64% arsenal size by R²; normalised, ~27%.
+
+### Which to use
+
+- **Surprise+** (column `surprise_plus`, from `normed_surprise`) for anything at
+  outing or short-window scale — the daily leaderboards, the social graphics,
+  single-game analysis.
+- **Deception+** (column `deception_plus`, from `unpredictability_ratio`) for
+  season-scale work, where it reaches 0.79 reliability and is the more interesting
+  quantity: it isolates *pattern-breaking* from *arsenal diversity* in a way
+  Surprise+ does not.
+
+They are not redundant and they disagree. Across archetypes, Spearman between raw
+absolute surprise and the ratio is about −0.3 — they are close to unrelated. Report
+both.
+
+Note also what Deception+ deliberately excludes. Because its baseline conditions
+on the count, a pitcher whose only tell is count-based is scored average — that
+predictability is *controlled away*, not counted. Surprise+ makes no such
+exclusion, which is why a position player or a one-pitch reliever lands at the
+bottom of Surprise+ but mid-pack on Deception+.
+
+`surp_excess` (model minus baseline surprise, in nats) remains available as the
+difference-scale companion to the ratio; it is better behaved than the ratio where
+baseline surprise is near zero, but it is no more reliable on short windows.
+
 ## Standardization: Deception+
 
 Raw ratios are hard to interpret. We standardize to a scaled metric:
@@ -197,6 +383,76 @@ This gives us:
 - **SD = 10** (one standard deviation = 10 points)
 - **Intuitive scale**: Similar to ERA+, wRC+, etc.
 
+### Which Population Sets μ and σ?
+
+`train_ppi(standardize = ...)` chooses the reference population:
+
+- **`"test"`** (default) — μ and σ from the pitchers actually evaluated. The
+  output then genuinely has mean 100 and SD 10, as described above.
+- **`"train"`** — μ and σ from the training period, giving an anchor that does not
+  move when you change the test window. Useful for comparing several test windows
+  fit from a single training window, but note it is measured **in sample**: model
+  surprise on training data is optimistically low, so this μ sits below the
+  out-of-sample μ and every score shifts upward. It is a stable anchor, not an
+  unbiased one.
+
+The daily pipeline is different again: it standardizes against fixed μ/σ stored in
+`baseline_params.rds` by `compute_baseline.R`, so that scores are comparable from
+day to day. Those parameters are estimated with the top and bottom 1% of ratios
+trimmed — μ and σ define the whole scale, so a handful of extreme values would
+otherwise drag it for everyone.
+
+**The calibration must run under the production regime.** The ratio is *not*
+invariant to how much data each per-pitcher model is fit on. More training data
+means less overfitting, which means lower model surprise in the numerator:
+
+| training pitches | 150 | 300 | 500 | 1000 | 3000 |
+|---|---|---|---|---|---|
+| ratio, 2-pitch arsenal | 1.066 | 1.014 | 1.001 | 0.998 | 0.997 |
+| ratio, 4-pitch arsenal | 1.138 | 1.037 | 1.012 | 0.999 | 0.999 |
+
+(Synthetic pitchers whose true unpredictability is identical in every column.)
+
+`compute_baseline.R` originally took a random 50/50 split of each pitcher's *full*
+multi-season history — often thousands of training pitches, and a test window of
+comparable size — while `run_daily.R` trains on at most 500 and scores a single
+day. μ was therefore measured at the flat end of that curve while production ran
+at the steep end, inflating every published score, worst for short-history
+pitchers with deep arsenals. σ was affected too: estimating each ratio from
+thousands of test pitches removes the estimation noise that a real one-day window
+carries, so σ came out too small and production spread exceeded 10.
+
+It now samples real game-days and reconstructs each one exactly as the daily
+pipeline would — same history cap, same minimums, same one-day test window.
+
+(A related worry turned out not to matter: pitchers drift across a season, so a
+random split sees no drift while a temporal split does. Measured, the effect on the
+ratio is under 0.004 — drift raises model and baseline surprise together and
+cancels. Training size is the variable that matters.)
+
+Surprise+ has its own anchor (`surprise_mu` / `surprise_sd`) in the same file,
+estimated from the same runs and trimmed the same way — it is a different scale
+and cannot share the ratio's μ/σ.
+
+**`baseline_params.rds` is versioned.** Any change to the scoring math invalidates
+previously saved μ/σ, and `run_daily.R` warns loudly rather than silently
+publishing scores on a stale scale. Re-run `compute_baseline.R` after such a
+change.
+
+### A Caveat on the Ratio
+
+Dividing two mean surprises is only well-conditioned when the denominator is
+comfortably above zero. For a pitcher who throws one pitch ~99% of the time, both
+the model and the baseline predict nearly perfectly, both mean surprises are close
+to zero, and their ratio is dominated by the rounding-level gap between them — such
+a pitcher can post a higher ratio than a genuinely coin-flip pitcher while the
+actual information gap is ~0.01 nats.
+
+The `surp_excess` column (model surprise **minus** baseline surprise, in nats)
+measures the same thing on a difference scale and does not have this failure mode.
+It is reported alongside the ratio, and is the sounder basis for any future
+respecification of Deception+.
+
 ## Training and Testing Periods
 
 ### Why Separate Train/Test?
@@ -211,30 +467,31 @@ We train on one period and evaluate on another to:
 
 The system supports three modes:
 
-1. **Same period** (`test_days` parameter):
+1. **Separate periods** (most common):
    ```r
-   start_date = "2025-03-01"
-   end_date = "2025-09-30"
-   test_days = 30
-   # Train: Mar 1 - Aug 31
-   # Test: Sep 1 - Sep 30
+   train_start = "2025-03-01"
+   train_end   = "2025-08-31"
+   test_start  = "2025-09-01"
+   test_end    = "2025-09-30"
    ```
 
-2. **Explicit periods** (can overlap):
+2. **Overlapping periods** (test partly inside train):
    ```r
-   train_start_date = "2025-03-01"
-   train_end_date = "2025-09-30"
-   test_start_date = "2025-08-01"  # Overlaps!
-   test_end_date = "2025-09-30"
+   train_start = "2025-03-01"
+   train_end   = "2025-09-30"
+   test_start  = "2025-08-01"   # Overlaps — scores are partly in-sample
+   test_end    = "2025-09-30"
    ```
 
-3. **Separate periods** (most common):
+3. **Random split** (no dates; 50/50 per pitcher over one period):
    ```r
-   train_start_date = "2025-03-01"
-   train_end_date = "2025-09-30"
-   test_start_date = "2025-10-01"  # Playoffs
-   test_end_date = "2025-11-05"
+   train_start  = "2025-03-01"
+   train_end    = "2025-09-30"
+   split_method = "random"
+   random_seed  = 42
    ```
+
+There is no `test_days` argument; the period is always given explicitly.
 
 ### Handling Test Period Pitchers Not in Training
 
@@ -257,11 +514,16 @@ Several features are categorical despite numeric appearance:
   - Runner on 1st ≠ 2 × runner on 2nd
   - Non-linear importance by configuration
 
+- `count`: 12-level factor over (balls, strikes). Jointly, not additively —
+  3-0 and 0-2 are not two steps along one axis.
+
+- `outs`: 3-level factor. One extra dummy, and it drops the assumption that two
+  outs is twice one out.
+
 ### Continuous Variables
 
 Some features remain continuous:
 
-- `balls`, `strikes`, `outs`: Natural ordinal scale
 - `score_diff`: Linear relationship (ahead by 5 ≈ 2.5 × ahead by 2)
 - Batter metrics (`o_swing_pct`, etc.): Continuous percentages (WIP)
 
@@ -288,16 +550,34 @@ This prevents model fitting errors on constant predictors.
 ```r
 model <- nnet::multinom(
   pitch_class ~ balls + strikes + two_strikes + ... ,
-  data = training_data,
+  data  = training_data,
   trace = FALSE,
-  maxit = 500
+  maxit = 500,     # 200 for per-pitcher models
+  decay = 1e-4     # 0.01 for per-pitcher models
 )
 ```
 
 - `pitch_class`: Response variable (pitch type factor)
 - Formula: All features included
 - `maxit = 500`: Usually converges in 50-100 iterations
-- No regularization: Want to fully fit training patterns
+- `decay`: light L2 penalty. The seasonal model is fit on hundreds of thousands
+  of pitches and barely notices it; the per-pitcher models are fit on a few
+  hundred pitches with a wide `last_pitch_type` factor, where separation is the
+  norm rather than the exception, and need the stronger setting.
+
+### Response Vocabulary Is Per-Pitcher
+
+Each per-pitcher model ranges over **that pitcher's own** pitch types — the classes
+in their history, plus any class they actually threw in the test window — not the
+league-wide vocabulary. Carrying league-wide factor levels into an individual
+model means most outcome classes have zero observations, and `nnet::multinom`
+responds by dropping them, leaving the fitted model narrower than the class set the
+caller believes it is working with.
+
+Test-window classes are deliberately kept in the support even when they are absent
+from the pitcher's history. A pitcher unveiling a new pitch *is* being
+unpredictable; that is the signal, not an inconvenience. Those pitches are scored
+against the smoothed prior, earning high but finite surprise.
 
 ### Convergence
 
@@ -317,29 +597,58 @@ If model fails to converge:
 ### From Model Predictions
 
 ```r
-# Get probability matrix: rows = pitches, columns = pitch types
-P_model <- predict(model, newdata = test_data, type = "probs")
+# Get probability matrix: rows = pitches, columns = pitch types.
+# safe_predict_probs() aligns the model's output to `classes` BY NAME.
+# This matters: nnet::multinom silently drops response levels it never saw, and
+# with exactly two levels predict() returns a bare vector instead of a matrix,
+# so the number and order of returned columns cannot be assumed.
+classes <- levels(training_data$pitch_class)
+P_model <- safe_predict_probs(model, test_data, classes)
+
+# Mix in a little of the training pitch mix before taking logs (see below)
+P_model <- shrink_to_prior(P_model, class_prior(training_data$pitch_class, classes))
 
 # For each pitch, extract probability of the actual pitch thrown
-classes <- levels(training_data$pitch_class)
-idx_actual <- match(test_data$pitch_class, classes)
+idx_actual <- match(as.character(test_data$pitch_class), classes)
 p_actual_model <- P_model[cbind(1:nrow(test_data), idx_actual)]
 
 # Calculate surprise
-surprise_model <- -log(pmax(p_actual_model, 1e-12))
+surprise_model <- -log(pmax(p_actual_model, 1e-9))
 ```
 
-The `pmax(..., 1e-12)` ensures we never take log(0).
+### Bounding the Surprise
+
+`-log(p)` is unbounded as `p → 0`, and an unpenalized multinomial fit on a few
+hundred pitches reaches complete separation routinely — it will happily report
+`p = 1e-15`. Clamping at some tiny epsilon does not fix this; it just converts an
+arbitrary probability into an arbitrary constant (a clamp at `1e-9` yields 20.7
+nats, roughly fifteen times a typical pitch's surprise).
+
+That matters more than it looks, because Deception+ is a *ratio*. The baseline is
+a smoothed frequency table and so has a natural probability floor, while the model
+did not. An unbounded numerator over a bounded denominator manufactures extreme
+scores out of numerical noise.
+
+Two mitigations, applied together:
+
+1. **Weight decay** on the multinomial fit (`decay`), which keeps coefficients —
+   and therefore fitted probabilities — away from the 0/1 boundary.
+2. **Shrinkage toward a prior** (`prob_shrinkage`): each probability row is mixed
+   with the training pitch mix, `p' = (1-λ)p + λ·prior`, before `-log()`. Applied
+   identically to model and baseline, so both sit on the same floor. Mixing with a
+   fixed distribution preserves the proper-scoring-rule property.
 
 ### From Baseline Model
 
 Similar process with simpler model or frequency table:
 
 ```r
-# For conditional baseline
-P_baseline <- conditional_freq_table[count_situation_cells, pitch_types]
+# For conditional baseline — note the IDENTICAL shrinkage applied to the model
+# above, so numerator and denominator of the ratio share a probability floor.
+P_baseline <- compute_baseline_probs(training_data, test_data)
+P_baseline <- shrink_to_prior(P_baseline, class_prior(training_data$pitch_class, classes))
 p_actual_baseline <- P_baseline[cbind(1:nrow(test_data), idx_actual)]
-surprise_baseline <- -log(pmax(p_actual_baseline, 1e-12))
+surprise_baseline <- -log(pmax(p_actual_baseline, 1e-9))
 ```
 
 ### Aggregation to Pitcher Level
@@ -364,6 +673,9 @@ pitcher_stats <- test_data %>%
 ## Validation and Interpretation
 
 ### Correlations with Performance
+
+These relationships predate the scoring corrections described above and have not been
+revalidated; the directions below are prior expectations, not current findings.
 
 Negative correlation with xFIP means: higher Deception+ → lower xFIP → better performance.
 Positive correlation with SwStr% means: higher Deception+ → more swinging strikes.

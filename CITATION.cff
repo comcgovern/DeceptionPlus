@@ -8,4 +8,5 @@ title: "Deception+: Measuring MLB and AAA pitcher unpredictability in R through 
 version: 1.0.0
 doi: 10.5281/zenodo.17553074
 date-released: 2025-11-07
-url: "https://github.com/comcgovern/PredictPlus"
+url: "https://github.com/comcgovern/DeceptionPlus"
+repository-code: "https://github.com/comcgovern/DeceptionPlus"
